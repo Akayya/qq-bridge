@@ -1,6 +1,7 @@
 // 人物/群档案 + 记忆自动提炼的自检：
 //   node scripts/test-profiles-distill.mjs          # 单测 + HTTP（需要桥接在 3100 跑）
 //   node scripts/test-profiles-distill.mjs --unit   # 只跑单测
+import { resolveChatTargets } from './lib/owner.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,9 +17,10 @@ const ok = (cond, name, extra = '') => {
   else { fail += 1; console.log(`  ❌ ${name}${extra ? ` — ${extra}` : ''}`); }
 };
 
-const OWNER = 'private:2086366020';
-const GROUP = 'group:168778193';
-const OTHER = 'private:227277385';
+const { ownerQQ: OWNER_QQ, groupQQ: GROUP_QQ, peerQQ: PEER_QQ } = resolveChatTargets();
+const OWNER = `private:${OWNER_QQ}`;
+const GROUP = `group:${GROUP_QQ}`;
+const OTHER = `private:${PEER_QQ}`;
 
 function profilesTests() {
   console.log('\n[1] 人物 / 群档案单测');
@@ -31,36 +33,36 @@ function profilesTests() {
     isSensitive: (t) => /accessToken\s*[:=]/i.test(t)
   });
 
-  const u1 = p.updatePerson({ qq: 2086366020, name: '管理员', traits: ['直爽'], facts: ['养了只猫叫年糕'], sourceKey: OWNER });
+  const u1 = p.updatePerson({ qq: OWNER_QQ, name: '管理员', traits: ['直爽'], facts: ['养了只猫叫年糕'], sourceKey: OWNER });
   ok(u1.ok && u1.person.name === '管理员', '新建人物档案', JSON.stringify(u1).slice(0, 120));
-  ok(p.personOf('2086366020')?.facts.includes('养了只猫叫年糕'), '按 QQ 读回档案');
+  ok(p.personOf(String(OWNER_QQ))?.facts.includes('养了只猫叫年糕'), '按 QQ 读回档案');
 
-  const u2 = p.updatePerson({ qq: 2086366020, traits: ['直爽', '爱用梗'], aliases: ['老板'] });
+  const u2 = p.updatePerson({ qq: OWNER_QQ, traits: ['直爽', '爱用梗'], aliases: ['老板'] });
   ok(u2.person.traits.length === 2, '重复标签去重、新标签追加', JSON.stringify(u2.person.traits));
   ok(u2.person.facts.includes('养了只猫叫年糕'), '合并不会丢旧事实');
 
   const many = Array.from({ length: 20 }, (_, i) => `标签${i}`);
-  const u3 = p.updatePerson({ qq: 227277385, name: '小明', traits: many });
+  const u3 = p.updatePerson({ qq: PEER_QQ, name: '小明', traits: many });
   ok(u3.person.traits.length <= 12, '标签条数被截断到 12', String(u3.person.traits.length));
 
-  const secret = p.updatePerson({ qq: 227277385, facts: ['accessToken: abcdef'] });
+  const secret = p.updatePerson({ qq: PEER_QQ, facts: ['accessToken: abcdef'] });
   ok(secret.ok && !secret.person.facts.some((f) => f.includes('accessToken')), '敏感事实被丢弃');
 
   const bad = p.updatePerson({ qq: 'abc' });
   ok(!bad.ok, '非数字 QQ 被拒', bad.error);
 
-  const g1 = p.updateGroup({ gid: 168778193, name: '摸鱼群', summary: ['主要聊工作和摸鱼'], members: [{ qq: '227277385', name: '小明' }] });
-  ok(g1.ok && g1.group.name === '摸鱼群' && g1.group.members['227277385'] === '小明', '新建群档案（含成员）', JSON.stringify(g1).slice(0, 140));
+  const g1 = p.updateGroup({ gid: GROUP_QQ, name: '摸鱼群', summary: ['主要聊工作和摸鱼'], members: [{ qq: String(PEER_QQ), name: '小明' }] });
+  ok(g1.ok && g1.group.name === '摸鱼群' && g1.group.members[String(PEER_QQ)] === '小明', '新建群档案（含成员）', JSON.stringify(g1).slice(0, 140));
 
-  p.updatePerson({ qq: 227277385, name: '小明', traits: ['话多'] });
+  p.updatePerson({ qq: PEER_QQ, name: '小明', traits: ['话多'] });
   const priv = p.formatFor(OWNER);
   ok(priv.includes('管理员') && priv.includes('年糕'), '私聊注入对方档案');
-  const grp = p.formatFor(GROUP, { recentSenders: ['227277385'] });
+  const grp = p.formatFor(GROUP, { recentSenders: [String(PEER_QQ)] });
   ok(grp.includes('摸鱼群') && grp.includes('小明'), '群注入群档案 + 最近说话的人', grp.slice(0, 80));
   ok(!p.formatFor('private:999999').includes('档案\n'), '没档案的私聊不注入空段');
 
-  const rm = p.remove({ qq: 227277385 });
-  ok(rm.removed === 1 && !p.personOf('227277385'), '删除人物档案');
+  const rm = p.remove({ qq: PEER_QQ });
+  ok(rm.removed === 1 && !p.personOf(String(PEER_QQ)), '删除人物档案');
 
   const listed = p.list();
   ok(listed.people.length === 1 && listed.groups.length === 1, 'list() 返回人物与群', JSON.stringify(p.stats()));
@@ -71,7 +73,7 @@ function distillTests() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dis-'));
   const mem = createSharedMemory({
     dbPath: path.join(dir, 'memory.db'),
-    ownerQQ: 2086366020,
+    ownerQQ: OWNER_QQ,
     log: () => {},
     sanitize: (t) => String(t),
     isSensitive: (t) => /accessToken\s*[:=]/i.test(t)
@@ -79,11 +81,11 @@ function distillTests() {
   const distiller = createDistiller({ memory: mem, log: () => {}, sanitize: (t) => String(t), isSensitive: (t) => /accessToken/i.test(t) });
 
   const messages = [
-    { seq: 1, sender: '2086366020', text: '我最喜欢喝冰美式了，热的完全不行' },
-    { seq: 2, sender: '2086366020', text: '我养了只猫，叫年糕' },
+    { seq: 1, sender: String(OWNER_QQ), text: '我最喜欢喝冰美式了，热的完全不行' },
+    { seq: 2, sender: String(OWNER_QQ), text: '我养了只猫，叫年糕' },
     { seq: 3, sender: 'bot', isSelf: true, text: '我最喜欢被人叫爸爸' },
-    { seq: 4, sender: '227277385', text: '以后别在群里提我体重的事' },
-    { seq: 5, sender: '227277385', text: '今天中午吃什么好呢' }
+    { seq: 4, sender: String(PEER_QQ), text: '以后别在群里提我体重的事' },
+    { seq: 5, sender: String(PEER_QQ), text: '今天中午吃什么好呢' }
   ];
 
   const cand = extractCandidates({ messages, existing: [], key: OWNER });
@@ -101,9 +103,9 @@ function distillTests() {
   // 疑问句不是记忆：这两句在真实聊天日志里曾被抓成「约定」，属于误报
   const q = extractCandidates({
     messages: [
-      { seq: 1, sender: '2086366020', text: '记得昨天干了什么吗' },
-      { seq: 2, sender: '616468161', text: '你今天吃了吗' },
-      { seq: 3, sender: '2086366020', text: '以后记得提醒我喝药' }
+      { seq: 1, sender: String(OWNER_QQ), text: '记得昨天干了什么吗' },
+      { seq: 2, sender: String(PEER_QQ + 1), text: '你今天吃了吗' },
+      { seq: 3, sender: String(OWNER_QQ), text: '以后记得提醒我喝药' }
     ],
     existing: [], key: OWNER
   });
@@ -119,12 +121,12 @@ function distillTests() {
   const stored = mem.listAll({ limit: 50 });
   ok(stored.length === applied.written.length && stored.every((e) => e.scope === `key:${OWNER}`), '落库条目默认会话私有', JSON.stringify(stored.map((e) => e.scope)));
 
-  const withFacts = distiller.preview({ key: OWNER, messages: [{ seq: 9, sender: '2086366020', text: '我今年 30 岁，在杭州上班' }], existing: [] });
+  const withFacts = distiller.preview({ key: OWNER, messages: [{ seq: 9, sender: String(OWNER_QQ), text: '我今年 30 岁，在杭州上班' }], existing: [] });
   ok(!withFacts.candidates.length || withFacts.candidates[0].kind === 'fact', '事实类识别为 fact（只进预览）', JSON.stringify(withFacts.candidates));
   const factApply = distiller.apply({ key: OWNER, candidates: withFacts.candidates, existing: [], includeFacts: true });
   ok(factApply.written.length >= 1 ? factApply.written[0].kind === 'fact' : true, 'includeFacts=true 才写事实');
 
-  const sensitive = distiller.preview({ key: OWNER, messages: [{ seq: 10, sender: '2086366020', text: '我喜欢把 accessToken 存桌面上' }], existing: [] });
+  const sensitive = distiller.preview({ key: OWNER, messages: [{ seq: 10, sender: String(OWNER_QQ), text: '我喜欢把 accessToken 存桌面上' }], existing: [] });
   ok(!sensitive.candidates.length, '含敏感词的候选被过滤');
 }
 
@@ -153,13 +155,13 @@ async function httpTests() {
 
   const marker = `自检档案-${Date.now()}`;
   // 控制台（无 agent token）直接改档案
-  const up = await post('/api/socialV2/profile', { op: 'update', target: 'person', qq: '2086366020', name: marker, traits: ['自检标签'], facts: ['自检事实：喜欢测试'] });
+  const up = await post('/api/socialV2/profile', { op: 'update', target: 'person', qq: String(OWNER_QQ), name: marker, traits: ['自检标签'], facts: ['自检事实：喜欢测试'] });
   ok(up.status === 200 && up.data.ok, '控制台可更新人物档案', JSON.stringify(up.data).slice(0, 120));
 
   const list = await get('/api/socialV2/profiles');
   ok(list.status === 200 && list.data.people?.some((x) => x.name === marker), '档案列表里能看到');
 
-  const one = await post('/api/socialV2/profile', { op: 'get', target: 'person', qq: '2086366020' });
+  const one = await post('/api/socialV2/profile', { op: 'get', target: 'person', qq: String(OWNER_QQ) });
   ok(one.data.person?.traits?.includes('自检标签'), 'op=get 读回标签');
 
   // 全库列表（管理页用）
@@ -179,7 +181,7 @@ async function httpTests() {
   ok(promptText.includes('【人物与群档案】'), '唤醒提示包含【人物与群档案】', `chars=${promptText.length}`);
   ok(promptText.includes(marker), '唤醒提示带上刚写的人物称呼');
 
-  const del = await post('/api/socialV2/profile', { op: 'remove', target: 'person', qq: '2086366020' });
+  const del = await post('/api/socialV2/profile', { op: 'remove', target: 'person', qq: String(OWNER_QQ) });
   ok(del.status === 200 && del.data.removed === 1, '删除自检档案', JSON.stringify(del.data));
 }
 

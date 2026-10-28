@@ -1,18 +1,35 @@
 // 从 SnowLuma 的 QQ 历史里重建某个私聊的 recentMessages（会话重置会把它清空）
+import { resolveOwnerQQ, ROOT } from './lib/owner.mjs';
+import path from 'node:path';
 import fs from 'node:fs';
 
-const KEY = process.argv[2] || 'private:2086366020';
+const KEY = process.argv[2] || `private:${resolveOwnerQQ()}`;
 const COUNT = Number(process.argv[3] || 60);
 const PEER = Number(KEY.split(':')[1]);
-const BOT = 2826691494;
 
-const cfg = JSON.parse(fs.readFileSync('D:/DSH_QQ_BOT/config.json', 'utf8'));
+const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
 const token = cfg.snowluma?.accessToken || '';
 const base = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+const authHeaders = token ? { authorization: `Bearer ${token}` } : {};
+
+// 机器人自己的 QQ 不写死在仓库里：优先环境变量，其次问 OneBot 要登录信息。
+let BOT = Number(process.env.BRIDGE_BOT_QQ || 0);
+if (!BOT) {
+  try {
+    const login = await fetch(`${base}/get_login_info`, { headers: authHeaders }).then((r) => r.json());
+    BOT = Number(login?.data?.user_id || 0);
+  } catch {
+    BOT = 0;
+  }
+}
+if (!BOT) {
+  console.error('拿不到机器人 QQ 号：请设置环境变量 BRIDGE_BOT_QQ，或确认 OneBot 在线');
+  process.exit(1);
+}
 
 const res = await fetch(`${base}/get_friend_msg_history`, {
   method: 'POST',
-  headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+  headers: { 'content-type': 'application/json', ...authHeaders },
   body: JSON.stringify({ user_id: PEER, count: COUNT })
 });
 const body = await res.json();
@@ -62,7 +79,7 @@ const messages = raw.map((m) => {
   };
 });
 
-const file = 'D:/DSH_QQ_BOT/state/social-v2.json';
+const file = path.join(ROOT, 'state', 'social-v2.json');
 const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
 const st = doc.conversations?.[KEY];
 if (!st) {

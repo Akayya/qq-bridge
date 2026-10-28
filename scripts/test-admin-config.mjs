@@ -1,3 +1,4 @@
+import { resolveChatTargets } from './lib/owner.mjs';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
@@ -23,11 +24,11 @@ const waitDown = async (ms = 20000) => {
 };
 const ownerToken = () => {
   const st = JSON.parse(fs.readFileSync('state/social-v2.json', 'utf8'));
-  return st.conversations?.['private:2086366020']?.agentToken ?? '';
+  return st.conversations?.[`private:${resolveOwnerQQ()}`]?.agentToken ?? '';
 };
 const otherToken = () => {
   const st = JSON.parse(fs.readFileSync('state/social-v2.json', 'utf8'));
-  return st.conversations?.['private:227277385']?.agentToken ?? '';
+  return st.conversations?.[`private:${resolveChatTargets().peerQQ}`]?.agentToken ?? '';
 };
 const admin = async (body) => {
   const r = await fetch(`${BASE}/api/admin/config`, { method: 'POST', headers: H, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });

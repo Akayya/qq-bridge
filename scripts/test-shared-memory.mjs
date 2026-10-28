@@ -1,6 +1,7 @@
 // 跨聊天共享记忆的自检：先跑纯模块单测（临时库），再对运行中的桥接做 HTTP 端到端测试。
 //   node scripts/test-shared-memory.mjs           # 全部
 //   node scripts/test-shared-memory.mjs --unit    # 只跑单测（不需要桥接在跑）
+import { resolveChatTargets } from './lib/owner.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,9 +15,10 @@ const ok = (cond, name, extra = '') => {
   else { fail += 1; console.log(`  ❌ ${name}${extra ? ` — ${extra}` : ''}`); }
 };
 
-const OWNER = 'private:2086366020';
-const GROUP = 'group:168778193';
-const OTHER_PRIVATE = 'private:227277385';
+const { ownerQQ: OWNER_QQ, groupQQ: GROUP_QQ, peerQQ: PEER_QQ } = resolveChatTargets();
+const OWNER = `private:${OWNER_QQ}`;
+const GROUP = `group:${GROUP_QQ}`;
+const OTHER_PRIVATE = `private:${PEER_QQ}`;
 
 function unitTests() {
   console.log('\n[1] 模块单测（临时库）');
@@ -25,7 +27,7 @@ function unitTests() {
   const logs = [];
   const mem = createSharedMemory({
     dbPath,
-    ownerQQ: 2086366020,
+    ownerQQ: OWNER_QQ,
     log: (m) => logs.push(String(m)),
     sanitize: (t) => String(t),
     isSensitive: (t) => /accessToken\s*[:=]/i.test(t)
