@@ -455,6 +455,24 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
           case '/api/socialV2/tool-log': return json({ ok: true, entries: state.toolLog });
           case '/api/socialV2/feedback': return json({ ok: true, entries: state.feedback });
           case '/api/socialV2/memory': return json({ ok: true, raw: { activeTopics: [{ text: '周末的阅读计划', pendingQuestion: '有没有推荐的书？' }], pendingThoughts: [{ text: '分享一张风景照片', motivation: '轻松交流' }], memberImpressions: { 演示群友: { traits: ['友善', '喜欢技术'], interactionCount: 6 } } } });
+          // 共享记忆全库（管理页）：只读示例，不含任何真实聊天内容
+          case '/api/socialV2/memory-global': return json({
+            ok: true,
+            count: 2,
+            stats: { total: 2, maxTotal: 400 },
+            byScope: { total: 2, all: 1, groups: 0, owner: 1, key: 0 },
+            entries: [
+              { id: 1, kind: 'preference', text: '演示：管理员喝咖啡只喝冰美式', tags: ['偏好'], scope: 'all', source_key: 'private:10001', created_at: '2026-10-28 10:00:00', used_at: '2026-10-28 10:00:00', hits: 3 },
+              { id: 2, kind: 'bond', text: '演示：管理员养了只猫叫年糕', tags: ['印象'], scope: 'owner', source_key: 'private:10001', created_at: '2026-10-28 11:00:00', used_at: '2026-10-28 11:00:00', hits: 1 }
+            ]
+          });
+          case '/api/socialV2/profiles': return json({
+            ok: true,
+            updatedAt: '2026-10-28T10:00:00.000Z',
+            people: [{ qq: '10001', name: '演示群友', aliases: ['小演'], traits: ['友善', '喜欢技术'], facts: ['在学 Rust'], sourceKey: 'group:123456789', updatedAt: '2026-10-28T10:00:00.000Z' }],
+            groups: [{ gid: '123456789', name: '演示群', summary: ['日常闲聊'], members: ['10001'], updatedAt: '2026-10-28T10:00:00.000Z' }],
+            format: '【人物与群档案】\n- 演示群友（私聊）：友善；在学 Rust'
+          });
           case '/api/socialV2/state': return json({ ok: true, key: url.searchParams.get('key'), wakeConfig: { mode: 'diving', infinite: false, sleepUntil: '2026-09-20T09:00:00.000Z', triggers: { atMention: true, keywords: ['小鲸鱼'] }, wakeCount: 4 }, wakeSafety: { guaranteed: true }, unreadCount: 2, lastWakeReason: 'atMention' });
           case '/api/socialV2/states': return json({ ok: true, conversations: state.sessions.map(x => ({ key: x.key, phase: 'diving', unreadCount: 2 })) });
           case '/api/socialV2/initial-prompt': {
@@ -589,6 +607,16 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
             else state.slang.forEach(x => { if (ids.includes(x.id)) x.status = path.endsWith('confirm') ? 'confirmed' : 'rejected'; });
             return json({ ok: true, count: ids.length, confirmed: ids.length, rejected: ids.length, deleted: ids.length });
           }
+          case '/api/socialV2/memory-global': return json({ ok: true, id: 99, scope: body.scope || 'key:private:10001' });
+          case '/api/socialV2/memory-global-remove': return json({ ok: true, removed: 1 });
+          case '/api/socialV2/memory-distill': return json({ ok: true, key: body.key || '', results: [], candidates: [], written: 0, skipped: 0 });
+          case '/api/socialV2/profile': return json({
+            ok: true,
+            op: body.op || 'update',
+            target: body.target || 'person',
+            person: body.target === 'group' ? undefined : { qq: String(body.qq || '10001'), name: '演示群友', aliases: [], traits: ['友善'], facts: [] },
+            group: body.target === 'group' ? { gid: String(body.gid || '123456789'), name: '演示群', summary: [], members: [] } : undefined
+          });
           case '/api/social/flush':
           case '/api/socialV2/wake':
           case '/api/socialV2/memory-clear':

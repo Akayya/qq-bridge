@@ -1771,6 +1771,7 @@ button:active:not(:disabled) {
       <button data-view="social-v2" class="nav-item"><span class="nav-icon" aria-hidden="true">◈</span>二代仿真<span class="nav-note">V2</span></button>
       <button data-view="social-v1" class="nav-item"><span class="nav-icon" aria-hidden="true">◇</span>一代仿真<span class="nav-note">V1</span></button>
       <button data-view="slang" class="nav-item"><span class="nav-icon" aria-hidden="true">▤</span>黑话词库</button>
+      <button data-view="memory" class="nav-item"><span class="nav-icon" aria-hidden="true">◍</span>记忆与档案</button>
       <div class="nav-label">管理</div>
       <button data-view="usage" class="nav-item"><span class="nav-icon" aria-hidden="true">◧</span>令牌与花费</button>
       <button data-view="access" class="nav-item"><span class="nav-icon" aria-hidden="true">⊙</span>访问与安全</button>
@@ -2302,7 +2303,74 @@ button:active:not(:disabled) {
       <div class="meta" style="margin-top:4px">修改上面任意推荐/默认参数后，必须点这个按钮才会持久化；保存后会自动应用到仍使用默认唤醒配置的会话，重启后仍然保留。</div>
 
       </div></section>
-<section id="section-slang" data-page="slang" class="card span-all">
+<section id="section-memory" data-page="memory" class="card span-all" hidden>
+      <h2>记忆与档案</h2>
+      <div class="meta">跨聊天共享记忆存在 <code>state/memory.db</code>（SQLite）：<b>所有聊天</b>对所有会话可见、<b>所有群</b>对所有群可见、<b>仅管理员</b>只在管理员私聊可见、<b>会话私有</b>只在来源聊天可见。唤醒时按可见范围注入提示词，并按关键词翻出【相关记忆】；人物/群档案存在 <code>state/profiles.json</code>，私聊注入对方档案，群里注入群概况 + 最近说话的人。</div>
+
+      <div class="row" style="margin-top:10px">
+        <span class="meta" id="memStats">—</span>
+        <button class="small" id="memRefresh">刷新</button>
+        <button class="small" id="memDistill">提炼预览</button>
+        <button class="small" id="memDistillApply">提炼并落库</button>
+        <span class="meta" id="memMsg"></span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="memSearch" placeholder="搜索内容 / 标签 / 来源" style="flex:1">
+        <select id="memKind" style="width:130px">
+          <option value="">全部类型</option>
+          <option value="fact">事实</option>
+          <option value="preference">偏好</option>
+          <option value="bond">关系</option>
+          <option value="rule">规矩</option>
+        </select>
+        <select id="memScope" style="width:170px">
+          <option value="">全部范围</option>
+          <option value="global">共享（所有聊天 / 所有群）</option>
+          <option value="owner">仅管理员私聊</option>
+          <option value="key">会话私有</option>
+        </select>
+      </div>
+      <div class="slang-scroll" id="memList" style="max-height:420px;overflow:auto;padding:6px">加载中…</div>
+
+      <h3 style="margin-top:18px">手动记一条</h3>
+      <div class="row">
+        <input type="text" id="memNewKey" placeholder="会话 key：private:QQ号 或 group:群号" style="flex:1">
+        <select id="memNewKind" style="width:110px">
+          <option value="fact">事实</option>
+          <option value="preference">偏好</option>
+          <option value="bond">关系</option>
+          <option value="rule">规矩</option>
+        </select>
+        <select id="memNewScope" style="width:170px">
+          <option value="">会话私有（默认）</option>
+          <option value="owner">仅管理员私聊</option>
+          <option value="groups">所有群可见</option>
+          <option value="all">所有聊天可见（仅管理员可写）</option>
+        </select>
+      </div>
+      <div class="row">
+        <input type="text" id="memNewText" placeholder="内容，例如：管理员喝咖啡只喝冰美式" style="flex:1">
+        <button class="small" id="memAdd">添加</button>
+      </div>
+
+      <h3 style="margin-top:18px">人物与群档案</h3>
+      <div class="row"><button class="small" id="profRefresh">刷新档案</button><span class="meta" id="profMsg"></span></div>
+      <div class="slang-scroll" id="profList" style="max-height:360px;overflow:auto;padding:6px">加载中…</div>
+
+      <h3 style="margin-top:18px">新增 / 更新档案</h3>
+      <div class="row">
+        <select id="profTarget" style="width:110px"><option value="person">人物</option><option value="group">群</option></select>
+        <input type="text" id="profId" placeholder="QQ 号 / 群号" style="width:170px">
+        <input type="text" id="profName" placeholder="称呼 / 群名" style="width:200px">
+      </div>
+      <div class="row">
+        <input type="text" id="profTraits" placeholder="标签（逗号分隔）：直爽、爱用梗" style="flex:1">
+        <input type="text" id="profFacts" placeholder="事实（分号分隔）：养了只猫叫年糕" style="flex:1">
+        <button class="small" id="profSave">保存</button>
+      </div>
+    </section>
+
+    <section id="section-slang" data-page="slang" class="card span-all">
       <h2>群聊黑话 / 网络用语库</h2>
       <div class="meta">DSH 会从群聊中自动提取疑似黑话候选；二代仿真模式下 AI 也可用 <code>qq_slang_submit</code> 主动提交陌生词。候选可批量送 DSH 深度联网研究，研究结果回到控制台由你删改修正后转正；确认后的词条会写入“黑话提示词”，注入一代/二代 AI 的聊天上下文，成为 AI 可查询和使用的记忆。</div>
 
@@ -3652,6 +3720,201 @@ document.getElementById('v2MemoryOutput').addEventListener('click', async (ev) =
   if (r.ok) loadV2Memory();
 });
 
+// ── 记忆与档案页（跨聊天共享记忆 + 人物/群档案 + 自动提炼）──────────────
+const MEM_KIND_LABEL = { fact: '事实', preference: '偏好', bond: '关系', rule: '规矩' };
+function memKindLabel(k) { return MEM_KIND_LABEL[k] || k || '其它'; }
+function memScopeLabel(scope) {
+  if (scope === 'all') return '所有聊天可见';
+  if (scope === 'groups') return '所有群可见';
+  if (scope === 'owner') return '仅管理员私聊';
+  if (String(scope || '').startsWith('key:')) return '会话私有 · ' + scope.slice(4);
+  return scope || '未知';
+}
+function memFmtTime(ts) {
+  const n = Number(ts);
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  return new Date(n).toLocaleString();
+}
+async function loadMemoryPage() {
+  await Promise.all([loadMemoryEntries(), loadProfiles()]);
+}
+async function loadMemoryEntries() {
+  const msg = document.getElementById('memMsg');
+  const params = new URLSearchParams({ all: '1', limit: '300' });
+  const q = document.getElementById('memSearch').value.trim();
+  const kind = document.getElementById('memKind').value;
+  const scope = document.getElementById('memScope').value;
+  if (q) params.set('q', q);
+  if (kind) params.set('kind', kind);
+  if (scope) params.set('scope', scope);
+  msg.textContent = '加载中…';
+  msg.className = 'meta';
+  try {
+    const r = await api('/api/socialV2/memory-global?' + params.toString());
+    if (!r.ok) { msg.textContent = '❌ ' + (r.error || '加载失败'); msg.className = 'meta err'; return; }
+    renderMemoryEntries(r);
+    msg.textContent = '';
+  } catch (e) {
+    msg.textContent = '❌ ' + (e.message || e);
+    msg.className = 'meta err';
+  }
+}
+function renderMemoryEntries(r) {
+  const box = document.getElementById('memList');
+  const stats = document.getElementById('memStats');
+  const by = r.byScope || {};
+  stats.textContent = `共 ${Number(r.count) || 0} 条：所有聊天 ${by.all || 0} · 所有群 ${by.groups || 0} · 仅管理员 ${by.owner || 0} · 会话私有 ${by.key || 0}`;
+  if (!Array.isArray(r.entries) || !r.entries.length) {
+    box.innerHTML = '<div class="meta" style="padding:8px">（没有符合条件的条目）</div>';
+    return;
+  }
+  box.innerHTML = r.entries.map((e) => `
+    <div class="row" style="align-items:flex-start;margin:6px 0;border-bottom:1px dashed rgba(0,0,0,.10);padding-bottom:6px">
+      <span class="pill">${esc(memKindLabel(e.kind))}</span>
+      <div style="flex:1;min-width:200px">
+        <div>${esc(e.text)}</div>
+        <div class="meta">${esc(memScopeLabel(e.scope))}${Array.isArray(e.tags) && e.tags.length ? ' · #' + esc(e.tags.join(' #')) : ''} · 来源 ${esc(e.sourceKey || '—')} · 用过 ${Number(e.hits) || 0} 次 · ${esc(memFmtTime(e.createdAt))}</div>
+      </div>
+      <button class="small danger" data-mem-remove="${Number(e.id)}">删除</button>
+    </div>`).join('');
+}
+async function addMemoryEntry() {
+  const msg = document.getElementById('memMsg');
+  const key = document.getElementById('memNewKey').value.trim();
+  const text = document.getElementById('memNewText').value.trim();
+  const kind = document.getElementById('memNewKind').value;
+  const scope = document.getElementById('memNewScope').value;
+  if (!key || !text) { msg.textContent = '请填写会话 key 与内容'; msg.className = 'meta err'; return; }
+  try {
+    const r = await api('/api/socialV2/memory-global', 'POST', { key, text, kind, scope });
+    msg.textContent = r.ok ? `✅ 已写入（${memScopeLabel(r.scope)}）` : ('❌ ' + (r.error || '写入失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    if (r.ok) { document.getElementById('memNewText').value = ''; loadMemoryEntries(); }
+  } catch (e) {
+    msg.textContent = '❌ ' + (e.message || e);
+    msg.className = 'meta err';
+  }
+}
+async function runMemoryDistill(applyNow) {
+  const msg = document.getElementById('memMsg');
+  const btn = document.getElementById(applyNow ? 'memDistillApply' : 'memDistill');
+  btn.disabled = true;
+  msg.textContent = applyNow ? '正在提炼并写入…' : '正在扫描各会话…';
+  msg.className = 'meta';
+  try {
+    const r = await api('/api/socialV2/memory-distill', 'POST', { all: true, apply: applyNow });
+    if (!r.ok) { msg.textContent = '❌ ' + (r.error || '提炼失败'); msg.className = 'meta err'; return; }
+    const sessions = Array.isArray(r.sessions) ? r.sessions : [];
+    const parts = sessions.filter((s) => (s.candidates || []).length).map((s) => {
+      const list = (s.candidates || []).map((c) => `【${memKindLabel(c.kind)}】${c.text}`).join('；');
+      const wrote = (s.written || []).length ? `（已写入 ${s.written.length} 条）` : '';
+      return `${s.key}${wrote}：${list}`;
+    });
+    msg.textContent = parts.length
+      ? (applyNow ? '✅ ' : '预览：') + parts.join(' ／ ')
+      : '这次没抽到新的候选句子（可能都已在库里）';
+    msg.className = parts.length ? 'meta ok' : 'meta';
+    if (applyNow) loadMemoryEntries();
+  } catch (e) {
+    msg.textContent = '❌ ' + (e.message || e);
+    msg.className = 'meta err';
+  } finally {
+    btn.disabled = false;
+  }
+}
+async function loadProfiles() {
+  const msg = document.getElementById('profMsg');
+  const box = document.getElementById('profList');
+  msg.textContent = '加载中…';
+  try {
+    const r = await api('/api/socialV2/profiles');
+    if (!r.ok) { msg.textContent = '❌ ' + (r.error || '加载失败'); msg.className = 'meta err'; return; }
+    const people = Array.isArray(r.people) ? r.people : [];
+    const groups = Array.isArray(r.groups) ? r.groups : [];
+    msg.textContent = `人物 ${people.length} 位 · 群 ${groups.length} 个`;
+    msg.className = 'meta';
+    if (!people.length && !groups.length) { box.innerHTML = '<div class="meta" style="padding:8px">（还没有档案；让 bot 用 qq_profile 记，或在这里手动填）</div>'; return; }
+    const renderPerson = (p) => `
+      <div class="row" style="align-items:flex-start;margin:6px 0;border-bottom:1px dashed rgba(0,0,0,.10);padding-bottom:6px">
+        <span class="pill">人物</span>
+        <div style="flex:1;min-width:200px">
+          <div><b>${esc(p.name || '(未命名)')}</b> <span class="meta">QQ ${esc(p.qq)}</span></div>
+          <div class="meta">${p.aliases && p.aliases.length ? '也叫 ' + esc(p.aliases.join('、')) + ' · ' : ''}${p.traits && p.traits.length ? '标签：' + esc(p.traits.join('、')) : '（无标签）'}</div>
+          ${p.facts && p.facts.length ? `<div class="meta">已知：${esc(p.facts.join('；'))}</div>` : ''}
+        </div>
+        <button class="small danger" data-prof-remove="person" data-prof-id="${esc(p.qq)}">删除</button>
+      </div>`;
+    const renderGroup = (g) => `
+      <div class="row" style="align-items:flex-start;margin:6px 0;border-bottom:1px dashed rgba(0,0,0,.10);padding-bottom:6px">
+        <span class="pill">群</span>
+        <div style="flex:1;min-width:200px">
+          <div><b>${esc(g.name || '(未命名群)')}</b> <span class="meta">群 ${esc(g.gid)}</span></div>
+          ${g.summary && g.summary.length ? `<div class="meta">概况：${esc(g.summary.join('；'))}</div>` : '<div class="meta">（无概况）</div>'}
+          ${g.members && Object.keys(g.members).length ? `<div class="meta">成员 ${Object.keys(g.members).length} 人</div>` : ''}
+        </div>
+        <button class="small danger" data-prof-remove="group" data-prof-id="${esc(g.gid)}">删除</button>
+      </div>`;
+    box.innerHTML = [...people.map(renderPerson), ...groups.map(renderGroup)].join('');
+  } catch (e) {
+    msg.textContent = '❌ ' + (e.message || e);
+    msg.className = 'meta err';
+  }
+}
+async function saveProfile() {
+  const msg = document.getElementById('profMsg');
+  const target = document.getElementById('profTarget').value;
+  const id = document.getElementById('profId').value.trim();
+  const name = document.getElementById('profName').value.trim();
+  const traits = document.getElementById('profTraits').value.split(/[,，、]/).map((s) => s.trim()).filter(Boolean);
+  const facts = document.getElementById('profFacts').value.split(/[;；\n]/).map((s) => s.trim()).filter(Boolean);
+  if (!id) { msg.textContent = '请填 QQ 号或群号'; msg.className = 'meta err'; return; }
+  const body = target === 'group'
+    ? { op: 'update', target: 'group', gid: id, name, summary: [...traits, ...facts] }
+    : { op: 'update', target: 'person', qq: id, name, traits, facts };
+  try {
+    const r = await api('/api/socialV2/profile', 'POST', body);
+    msg.textContent = r.ok ? '✅ 已保存' : ('❌ ' + (r.error || '保存失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    if (r.ok) loadProfiles();
+  } catch (e) {
+    msg.textContent = '❌ ' + (e.message || e);
+    msg.className = 'meta err';
+  }
+}
+document.getElementById('memRefresh').addEventListener('click', () => loadMemoryEntries());
+document.getElementById('memSearch').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') loadMemoryEntries(); });
+document.getElementById('memKind').addEventListener('change', () => loadMemoryEntries());
+document.getElementById('memScope').addEventListener('change', () => loadMemoryEntries());
+document.getElementById('memAdd').addEventListener('click', addMemoryEntry);
+document.getElementById('memDistill').addEventListener('click', () => runMemoryDistill(false));
+document.getElementById('memDistillApply').addEventListener('click', () => runMemoryDistill(true));
+document.getElementById('memList').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button[data-mem-remove]');
+  if (!btn) return;
+  const id = Number(btn.dataset.memRemove);
+  if (!confirm(`删除这条记忆（id=${id}）？`)) return;
+  const key = document.getElementById('memNewKey').value.trim();
+  const r = await api('/api/socialV2/memory-global-remove', 'POST', { key, id });
+  const msg = document.getElementById('memMsg');
+  msg.textContent = r.ok ? '✅ 已删除' : ('❌ ' + (r.error || '删除失败'));
+  msg.className = r.ok ? 'meta ok' : 'meta err';
+  if (r.ok) loadMemoryEntries();
+});
+document.getElementById('profRefresh').addEventListener('click', () => loadProfiles());
+document.getElementById('profSave').addEventListener('click', saveProfile);
+document.getElementById('profList').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button[data-prof-remove]');
+  if (!btn) return;
+  const target = btn.dataset.profRemove;
+  const id = btn.dataset.profId;
+  if (!confirm(`删除这份${target === 'group' ? '群' : '人物'}档案（${id}）？`)) return;
+  const r = await api('/api/socialV2/profile', 'POST', { op: 'remove', target, qq: target === 'person' ? id : undefined, gid: target === 'group' ? id : undefined });
+  const msg = document.getElementById('profMsg');
+  msg.textContent = r.ok ? '✅ 已删除' : ('❌ ' + (r.error || '删除失败'));
+  msg.className = r.ok ? 'meta ok' : 'meta err';
+  if (r.ok) loadProfiles();
+});
+
 function formatWakeStatus(r) {
   if (!r || !r.ok) return '<span class="meta">加载失败</span>';
   const wc = r.wakeConfig || {};
@@ -4430,6 +4693,7 @@ const consolePages = {
   'social-v2': ['二代仿真', '自主参与，恰到好处。', '管理 AI 的工具、唤醒与发言节奏。展开需要调整的分组，修改后保存参数。'],
   'social-v1': ['一代仿真', '为自然对话，设定合适的节奏。', '调整参与概率、活跃周期和分条发送；所有配置项完整保留。'],
   slang: ['黑话词库', '读懂群聊里的，言外之意。', '从候选到确认，让 AI 逐渐熟悉大家的表达习惯。'],
+  memory: ['记忆与档案', '记得住，才聊得久。', '跨聊天的共享记忆、人物与群档案，以及自动提炼的候选句子，都在这里管。'],
   usage: ['令牌与花费', '每一次思考，都算得清楚。', '实时查看 AI 的 token 消耗与花费，可下钻到每个群、每个好友、每一轮对话。'],
   access: ['访问与安全', '明确边界，安心连接。', '管理允许对话的对象、管理员权限与控制台访问凭证。'],
   operations: ['调试与运维', '让桥接，始终井然有序。', '测试消息、引导 AI，或维护桥接进程与会话工作区。'],
@@ -4462,6 +4726,8 @@ function setConsolePage(page, { updateHash = true, focus = false, target = '' } 
   closeConsoleSearch();
   // 语音库按需加载：进入二代仿真页时才探测（避免每次开控制台都压网关）。
   if (page === 'social-v2' && typeof loadVoiceLibrary === 'function') loadVoiceLibrary();
+  // 记忆与档案页按需加载（全库列表 + 档案，进来才请求）。
+  if (page === 'memory' && typeof loadMemoryPage === 'function') loadMemoryPage();
   if (focus) {
     document.getElementById('mainContent').focus({ preventScroll: true });
     document.getElementById(target || 'mainContent')?.scrollIntoView({ block: 'start', behavior: 'instant' });

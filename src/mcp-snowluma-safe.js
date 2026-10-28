@@ -326,6 +326,8 @@ const TOOL_CONFIG_FLAGS = {
   qq_memory_query: 'memory',
   qq_memory_remove: 'memory',
   qq_memory_clear: 'memory',
+  qq_profile: 'memory',
+  qq_memory_distill: 'memory',
   qq_slang_query: 'slangQuery',
   qq_slang_submit: 'slangSubmit',
   qq_send_voice: 'sendVoice',
@@ -1027,6 +1029,61 @@ server.tool(
       return { content: [{ type: 'text', text: serializeModelData(data) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `记忆清空失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_profile',
+  '人物/群档案：查或改「这个人/这个群是谁」的结构化速览（称呼、性格标签、已知事实、群概况）。私聊注入对方档案，群里注入群概况+最近说话的人的档案。只记长期有用的事，别把每句话都写成档案。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    op: z.enum(['get', 'update', 'remove']).optional().describe('get=查看（默认）、update=追加/覆盖、remove=删除整份档案'),
+    target: z.enum(['person', 'group']).optional().describe('operation 针对人物（person）还是群（group），默认 person'),
+    qq: z.string().optional().describe('target=person 时的 QQ 号'),
+    gid: z.string().optional().describe('target=group 时的群号'),
+    name: z.string().optional().describe('称呼/群名'),
+    aliases: z.array(z.string()).optional().describe('别称、外号（最多 6 个）'),
+    traits: z.array(z.string()).optional().describe('性格/说话风格标签，例如「直、爱用梗」（最多 12 条，每条 160 字内）'),
+    facts: z.array(z.string()).optional().describe('长期有用的事实，例如「养了只猫叫年糕」（最多 30 条）'),
+    summary: z.array(z.string()).optional().describe('仅 target=group：群概况要点（最多 12 条）'),
+    members: z.array(z.object({ qq: z.string(), name: z.string() })).optional().describe('仅 target=group：成员 QQ 与群名片，用于以后 @ 人和认人')
+  },
+  async ({ key, token, op, target, qq, gid, name, aliases, traits, facts, summary, members }) => {
+    try {
+      const data = await agentApi('/api/socialV2/profile', {
+        method: 'POST',
+        body: JSON.stringify({ op: op || 'get', target: target || 'person', key, qq, gid, name, aliases, traits, facts, summary, members }),
+        headers: { 'x-agent-token': token }
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `人物档案操作失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_memory_distill',
+  '从最近的聊天里提炼「以后还用得上」的句子（偏好/关系/约定/事实）。默认只给预览，确认后传 apply=true 才落库；不传 key 就扫全部会话。没把握的内容别直接 apply。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号；传 all=true 可忽略'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    all: z.boolean().optional().describe('扫描所有会话'),
+    apply: z.boolean().optional().describe('true=直接写入共享记忆（默认只预览）'),
+    includeFacts: z.boolean().optional().describe('apply 时是否连「事实」类一起写（默认只写偏好/关系/约定）')
+  },
+  async ({ key, token, all, apply, includeFacts }) => {
+    try {
+      const data = await agentApi('/api/socialV2/memory-distill', {
+        method: 'POST',
+        body: JSON.stringify({ key, all: all === true, apply: apply === true, includeFacts: includeFacts === true }),
+        headers: { 'x-agent-token': token }
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `记忆提炼失败：${error?.message ?? error}` }], isError: true };
     }
   }
 );

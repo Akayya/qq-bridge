@@ -251,6 +251,52 @@ export function createSharedMemory({
     }));
   }
 
+  /** 管理页用：不分会话，列出全部条目（可按 kind / scope / 关键词过滤） */
+  function listAll({ kind = '', scope = '', q = '', limit = 200, offset = 0 } = {}) {
+    const conn = open();
+    if (!conn) return [];
+    const rows = conn.prepare('SELECT * FROM memories ORDER BY created_at DESC, id DESC').all();
+    const kindFilter = MEMORY_KINDS.includes(String(kind)) ? String(kind) : '';
+    const scopeFilter = String(scope ?? '').trim();
+    const needle = String(q ?? '').trim().toLowerCase();
+    const mapped = rows.map((r) => ({
+      id: Number(r.id),
+      kind: r.kind,
+      text: r.text,
+      tags: parseTags(r.tags),
+      scope: r.scope,
+      sourceKey: r.source_key,
+      createdAt: Number(r.created_at),
+      usedAt: Number(r.used_at),
+      hits: Number(r.hits)
+    }));
+    const filtered = mapped.filter((e) => {
+      if (kindFilter && e.kind !== kindFilter) return false;
+      if (scopeFilter === 'global' && e.scope !== 'all' && e.scope !== 'groups') return false;
+      if (scopeFilter && scopeFilter !== 'global' && e.scope !== scopeFilter) return false;
+      if (needle) {
+        const hay = `${e.text} ${e.tags.join(' ')} ${e.sourceKey}`.toLowerCase();
+        if (!hay.includes(needle)) return false;
+      }
+      return true;
+    });
+    const start = Math.max(0, Number(offset) || 0);
+    return filtered.slice(start, start + Math.max(1, Math.min(500, Number(limit) || 200)));
+  }
+
+  /** 按 scope 前缀统计（管理页顶部数字） */
+  function countByScope() {
+    const out = { total: 0, all: 0, groups: 0, owner: 0, key: 0 };
+    for (const e of listAll({ limit: 500 })) {
+      out.total += 1;
+      if (e.scope === 'all') out.all += 1;
+      else if (e.scope === 'groups') out.groups += 1;
+      else if (e.scope === 'owner') out.owner += 1;
+      else out.key += 1;
+    }
+    return out;
+  }
+
   /** 选出本轮要注入的条目（纯计算，不动 used_at） */
   function pickEntries(key, { maxEntries = DEFAULT_INJECT_ENTRIES, maxChars = DEFAULT_INJECT_CHARS } = {}) {
     const entries = listFor(key, { limit: maxEntries });
@@ -442,5 +488,5 @@ export function createSharedMemory({
     db = null;
   }
 
-  return { append, listFor, injectFor, injectBundle, search, relatedFor, remove, stats, importMany, close, scopeMatches, _dbPath: dbPath };
+  return { append, listFor, listAll, countByScope, injectFor, injectBundle, search, relatedFor, remove, stats, importMany, close, scopeMatches, _dbPath: dbPath };
 }

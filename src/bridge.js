@@ -59,12 +59,19 @@ import { ocrImageBuffer, extFromMime } from './ocr.js';
 import { translateText } from './translate.js';
 import { createMemeWiki } from './memewiki.js';
 import { createSharedMemory } from './shared-memory.js';
+import { createProfiles } from './profiles.js';
+import { createDistiller } from './memory-distill.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const STATE_DIR = path.join(ROOT, 'state');
 // 跨聊天共享记忆（SQLite）：模块级单例，首次用到时在 getSharedMemory() 里懒初始化。
 let sharedMemoryInstance = null;
+// 人物与群档案（state/profiles.json）与记忆自动提炼器：同样懒初始化。
+let profilesInstance = null;
+let distillerInstance = null;
+// 记忆自动提炼的定时器句柄（main() 里设置）。
+const memoryDistill = { timer: null };
 const STATE_FILE = path.join(STATE_DIR, 'sessions.json');
 const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
 const SLANG_FILE = path.join(STATE_DIR, 'slang.json');
@@ -6790,6 +6797,20 @@ async function main() {
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/memory-global') {
+          const mem = getSharedMemory();
+          // 管理页（控制台）：不分会话列出全部条目，可按 kind/scope/关键词过滤。
+          // 只给带 x-console-token 的管理端用；智能体调用（x-agent-call）不允许整库导出。
+          if (url.searchParams.get('all') === '1') {
+            if (req.headers['x-agent-call'] !== undefined) { sendJson({ ok: false, error: '管理端接口不接受智能体调用' }, 403); return; }
+            const entries = mem.listAll({
+              kind: url.searchParams.get('kind') ?? '',
+              scope: url.searchParams.get('scope') ?? '',
+              q: url.searchParams.get('q') ?? '',
+              limit: url.searchParams.get('limit') ?? 200
+            });
+            sendJson({ ok: true, count: entries.length, entries, byScope: mem.countByScope(), stats: mem.stats() });
+            return;
+          }
           const key = String(url.searchParams.get('key') ?? '').trim();
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
           if (req.headers['x-agent-token'] && !agentTokenOkAny(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: agentTokenErrText(key, req.headers['x-agent-token']) }, 403); return; }
@@ -6797,7 +6818,6 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_query' }, 403); return; }
           const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit')) || 30));
           const q = String(url.searchParams.get('q') ?? '').trim();
-          const mem = getSharedMemory();
           if (q) {
             const hits = mem.search(q, { key, limit });
             sendJson({ ok: true, key, q, count: hits.length, entries: hits, stats: mem.stats() });
@@ -6810,14 +6830,92 @@ async function main() {
         if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-global-remove') {
           const body = await readBody();
           const key = String(body.key ?? '').trim();
-          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
-          if (req.headers['x-agent-token'] && !agentTokenOkAny(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: agentTokenErrText(key, req.headers['x-agent-token']) }, 403); return; }
-          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
-          if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_remove' }, 403); return; }
+          const isAgentCall = req.headers['x-agent-call'] !== undefined;
+          // 管理页（控制台令牌、非智能体调用）可以不带 key 直接按 id 删；
+          // 智能体调用必须给 key，用来校验令牌归属与工具开关。
+          if (!key && isAgentCall) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (key) {
+            if (req.headers['x-agent-token'] && !agentTokenOkAny(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: agentTokenErrText(key, req.headers['x-agent-token']) }, 403); return; }
+            if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+            if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_remove' }, 403); return; }
+          }
           const r = getSharedMemory().remove({ id: body.id, text: body.text });
           if (!r.ok) { sendJson({ ok: false, error: r.error }, 400); return; }
-          log(`共享记忆：${key} 删除 ${r.removed} 条`);
+          log(`共享记忆：${key || '（控制台）'} 删除 ${r.removed} 条`);
           sendJson({ ok: true, key, removed: r.removed });
+          return;
+        }
+        // ── 人物 / 群档案（state/profiles.json）────────────────────────────────
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/profiles') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          const data = getProfiles().list();
+          if (!key) { sendJson({ ...data, stats: getProfiles().stats() }); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOkAny(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: agentTokenErrText(key, req.headers['x-agent-token']) }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          const st = getSocialV2State(key);
+          const recentSenders = (Array.isArray(st.recentMessages) ? st.recentMessages : []).filter((m) => m && !m.isSelf).slice(-6).map((m) => m.sender ?? m.userId);
+          sendJson({ ok: true, key, format: getProfiles().formatFor(key, { recentSenders }), person: key.startsWith('private:') ? getProfiles().personOf(key.slice(8)) : null, group: key.startsWith('group:') ? getProfiles().groupOf(key.slice(6)) : null });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/profile') {
+          const body = await readBody();
+          const op = String(body.op ?? 'get').trim();
+          const target = String(body.target ?? 'person').trim();
+          const key = String(body.key ?? '').trim();
+          if (key) {
+            if (req.headers['x-agent-token'] && !agentTokenOkAny(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: agentTokenErrText(key, req.headers['x-agent-token']) }, 403); return; }
+            if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          }
+          if (op === 'get') {
+            if (target === 'group') sendJson({ ok: true, group: getProfiles().groupOf(body.gid) });
+            else sendJson({ ok: true, person: getProfiles().personOf(body.qq) });
+            return;
+          }
+          if (op === 'remove') {
+            const r = getProfiles().remove({ qq: target === 'person' ? body.qq : undefined, gid: target === 'group' ? body.gid : undefined });
+            log(`人物档案：删除 ${r.removed} 条`);
+            sendJson(r);
+            return;
+          }
+          if (op !== 'update') { sendJson({ ok: false, error: 'op 必须是 get / update / remove' }, 400); return; }
+          const r = target === 'group'
+            ? getProfiles().updateGroup({ gid: body.gid, name: body.name, summary: body.summary, members: body.members })
+            : getProfiles().updatePerson({ qq: body.qq, name: body.name, aliases: body.aliases, traits: body.traits, facts: body.facts, sourceKey: key || undefined });
+          if (!r.ok) { sendJson({ ok: false, error: r.error }, 400); return; }
+          log(`人物档案：${target} 已更新（${target === 'group' ? r.group.gid : r.person.qq}）`);
+          sendJson(r);
+          return;
+        }
+        // ── 记忆自动提炼（规则抽取，可选直接落库）──────────────────────────────
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-distill') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const applyNow = body.apply === true;
+          const includeFacts = body.includeFacts === true;
+          const mem = getSharedMemory();
+          const distiller = getDistiller();
+          const existing = mem.listAll({ limit: 500 }).map((e) => e.text);
+          const distillOne = (k, st) => {
+            const messages = (Array.isArray(st?.recentMessages) ? st.recentMessages : []).slice(-40);
+            const preview = distiller.preview({ key: k, messages, existing });
+            const result = applyNow ? distiller.apply({ key: k, candidates: preview.candidates, existing, includeFacts }) : { written: [], skipped: [] };
+            return { key: k, candidates: preview.candidates, written: result.written, skipped: result.skipped };
+          };
+          if (body.all === true) {
+            const out = [];
+            for (const k of socialV2.conversations.keys()) {
+              try { out.push(distillOne(k, getSocialV2State(k))); } catch (error) { out.push({ key: k, error: error?.message ?? String(error) }); }
+            }
+            const written = out.reduce((n, r) => n + (r.written?.length || 0), 0);
+            if (written) saveSocialV2State();
+            sendJson({ ok: true, all: true, applied: applyNow, sessions: out, written });
+            return;
+          }
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空（或传 all:true）' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOkAny(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: agentTokenErrText(key, req.headers['x-agent-token']) }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          const r = distillOne(key, getSocialV2State(key));
+          sendJson({ ok: true, ...r, applied: applyNow });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-append') {
@@ -8910,6 +9008,8 @@ async function main() {
         proactiveTimer: null,
         rateLimitRetryTimer: null,
         lastIncomingAt: 0,
+        // 记忆自动提炼的水位：上次扫过这条会话时的毫秒时间戳（只处理更新的消息）。
+        lastDistillAt: 0,
         preSleepWaitSatisfiedAt: 0,
         preSleepWaitObservedAt: 0,
         preSleepWaitAccumMs: 0,
@@ -8978,6 +9078,7 @@ async function main() {
             replyCheckTimer: null,
             proactiveTimer: null,
             lastIncomingAt: Number(val.lastIncomingAt) || 0,
+            lastDistillAt: Number(val.lastDistillAt) || 0,
             preSleepWaitSatisfiedAt: Number(val.preSleepWaitSatisfiedAt) || 0,
             preSleepWaitObservedAt: Number(val.preSleepWaitObservedAt) || 0,
             preSleepWaitAccumMs: Number(val.preSleepWaitAccumMs) || 0,
@@ -9067,6 +9168,7 @@ async function main() {
           sendTimes: st.sendTimes.slice(-500),
           stickerCollectTimes: Array.isArray(st.stickerCollectTimes) ? st.stickerCollectTimes.slice(-500) : [],
           lastIncomingAt: st.lastIncomingAt || 0,
+          lastDistillAt: st.lastDistillAt || 0,
           preSleepWaitSatisfiedAt: st.preSleepWaitSatisfiedAt || 0,
           preSleepWaitObservedAt: st.preSleepWaitObservedAt || 0,
           preSleepWaitAccumMs: st.preSleepWaitAccumMs || 0,
@@ -9292,6 +9394,30 @@ async function main() {
       isSensitive: (t) => SENSITIVE_RE.test(String(t ?? '').replace(/[A-Za-z]:[\\/][^\s"'<>|]*/g, ''))
     });
     return sharedMemoryInstance;
+  }
+
+  // 人物与群档案（state/profiles.json）：私聊注入对方档案、群里注入群概况 + 最近说话的人。
+  function getProfiles() {
+    if (profilesInstance) return profilesInstance;
+    profilesInstance = createProfiles({
+      filePath: path.join(STATE_DIR, 'profiles.json'),
+      log,
+      sanitize: (t) => redactSensitiveText(t),
+      isSensitive: (t) => SENSITIVE_RE.test(String(t ?? '').replace(/[A-Za-z]:[\\/][^\s"'<>|]*/g, ''))
+    });
+    return profilesInstance;
+  }
+
+  // 记忆自动提炼：规则抽取 + 按类别决定是否直接落库（偏好/关系/约定自动，事实只进预览）。
+  function getDistiller() {
+    if (distillerInstance) return distillerInstance;
+    distillerInstance = createDistiller({
+      memory: getSharedMemory(),
+      log,
+      sanitize: (t) => redactSensitiveText(t),
+      isSensitive: (t) => SENSITIVE_RE.test(String(t ?? '').replace(/[A-Za-z]:[\\/][^\s"'<>|]*/g, ''))
+    });
+    return distillerInstance;
   }
 
   function formatMemoryV2(st) {
@@ -9949,6 +10075,47 @@ async function main() {
   if (cfg.social?.enabled !== false) {
     startSocialLoop();
   }
+
+  // 记忆自动提炼：每 30 分钟扫一遍「已经安静下来」的会话，把偏好/关系/约定类句子
+  // 抽成共享记忆（事实类只进预览）。间隔与开关走 cfg.memory.autoDistill。
+  function startMemoryDistillLoop() {
+    if (memoryDistill.timer) clearInterval(memoryDistill.timer);
+    const cfgDistill = cfg.memory?.autoDistill ?? {};
+    if (cfgDistill.enabled === false) { log('记忆自动提炼：已关闭（cfg.memory.autoDistill.enabled=false）'); return; }
+    const everyMs = Math.max(5 * 60_000, Number(cfgDistill.intervalMinutes || 30) * 60_000);
+    const idleMs = Math.max(10 * 60_000, Number(cfgDistill.idleMinutes || 90) * 60_000);
+    memoryDistill.timer = setInterval(() => {
+      try { runMemoryDistillPass({ idleMs }); } catch (error) { log(`⚠️ 记忆自动提炼失败：${error?.message ?? error}`); }
+    }, everyMs);
+    memoryDistill.timer.unref?.();
+    log(`记忆自动提炼：已启动（每 ${Math.round(everyMs / 60_000)} 分钟检查一次安静 ${Math.round(idleMs / 60_000)} 分钟以上的会话）`);
+  }
+
+  function runMemoryDistillPass({ idleMs = 90 * 60_000 } = {}) {
+    const mem = getSharedMemory();
+    const distiller = getDistiller();
+    const existing = mem.listAll({ limit: 500 }).map((e) => e.text);
+    const now = Date.now();
+    let written = 0;
+    for (const key of socialV2.conversations.keys()) {
+      const st = getSocialV2State(key);
+      const lastIncoming = Number(st.lastIncomingAt) || 0;
+      if (!lastIncoming || now - lastIncoming < idleMs) continue;   // 还在聊，先不抽
+      const since = Math.max(Number(st.lastDistillAt) || 0, 0);
+      if (since && lastIncoming <= since) continue;                  // 这段已经处理过
+      const messages = (Array.isArray(st.recentMessages) ? st.recentMessages : [])
+        .filter((m) => !since || (Number(m.time) || 0) > since)
+        .slice(-40);
+      if (!messages.length) continue;
+      const preview = distiller.preview({ key, messages, existing });
+      const result = distiller.apply({ key, candidates: preview.candidates, existing });
+      st.lastDistillAt = now;
+      written += result.written.length;
+    }
+    if (written) saveSocialV2State();
+  }
+
+  startMemoryDistillLoop();
 
   // 当前角色扮演提示：读 state/current-role.json + roles/<角色>.md，
   // 由桥接注入到 QQ 群消息（群友无法通过对话修改，只能由管理端写该文件）。
@@ -10844,6 +11011,21 @@ async function main() {
     })();
     const sharedMemoryLine = sharedBundle.text ? `${sharedBundle.text}\n\n` : '';
     const relatedMemoryLine = sharedBundle.relatedText ? `${sharedBundle.relatedText}\n\n` : '';
+    // 人物与群档案：私聊注入对方档案；群里注入群概况 + 最近说话的 3 个人的档案。
+    const profilesLine = (() => {
+      try {
+        const recentSenders = (Array.isArray(st.recentMessages) ? st.recentMessages : [])
+          .filter((m) => m && !m.isSelf)
+          .slice(-6)
+          .map((m) => m.sender ?? m.userId)
+          .filter(Boolean);
+        const text = getProfiles().formatFor(key, { recentSenders });
+        return text ? `${text}\n\n` : '';
+      } catch (error) {
+        log(`⚠️ 人物档案注入失败：${error?.message ?? error}`);
+        return '';
+      }
+    })();
     // 注意：黑话表不在这里注入，deliverPromptNow 的 withSlangContext 会统一注入，
     // 避免唤醒 prompt 出现两份黑话表。
     const participationText = formatParticipationV2(st);
@@ -10893,7 +11075,7 @@ async function main() {
     const crossChatLine = key === (cfg.ownerQQ ? `private:${Number(cfg.ownerQQ)}` : '')
       ? '【跨聊天操作】你是管理员会话：管理员让你去别的聊天（某群 / 某人私聊）读消息、发消息、撤回、点赞、识别图片时，直接把目标会话 key（group:群号 或 private:QQ号）传给对应工具、令牌仍用上面的【会话令牌】即可；桥接只放行白名单内的聊天，被拒绝就如实说「那个聊天不在白名单」。没有管理员指令时不要主动跑去别的聊天发言。\n\n'
       : '';
-    const base = roleLine + identityLine + tokenLine + crossChatLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + sharedMemoryLine + relatedMemoryLine + participationLine + preSleepLine + timeSenseLine;
+    const base = roleLine + identityLine + tokenLine + crossChatLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + profilesLine + sharedMemoryLine + relatedMemoryLine + participationLine + preSleepLine + timeSenseLine;
     // 唤醒原因里的那条消息本身多旧：`atMention@seq194` 这种形态能反查到原消息。
     const triggeredSeq = wakeReasonSeq(reason);
     const triggeredMsg = triggeredSeq ? findV2MessageBySeq(st, triggeredSeq) : null;
