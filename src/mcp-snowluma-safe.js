@@ -330,6 +330,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_slang_submit: 'slangSubmit',
   qq_send_voice: 'sendVoice',
   qq_list_voices: 'sendVoice',
+  qq_admin: 'admin',
   // 下面这些曾经漏登记。漏一个不是"多注册一个工具"那么轻：桥接那边按 `v2ToolEnabled(flag)`
   // 在**调用期**一律 403，而这里不登记就等于"控制台显示已关闭、模型每次请求仍收到它的完整
   // 描述与参数 schema，然后调用它、再拿到 403"——既白烧 token（本文件开头 176 行起就是为省这份
@@ -337,6 +338,9 @@ const TOOL_CONFIG_FLAGS = {
   // （见 bridge.js 的 socialV2.tools 默认表），所以此前它一直是"默认关闭却仍然可见"。
   qq_send_poke: 'sendPoke',
   qq_get_message_images: 'getImages',
+  qq_ocr: 'ocr',
+  qq_recall: 'recall',
+  qq_send_like: 'like',
   qq_get_forward_msg: 'getForwardMsg',
   qq_list_stickers: 'listStickers',
   qq_get_sticker_image: 'getStickerImage',
@@ -345,6 +349,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_get_self_image: 'getSelfImage',
   qq_sticker_note: 'stickerNote',
   qq_set_sticker_remark: 'setStickerRemark',
+  qq_meme: 'meme',
 };
 const disabledTools = [];
 {
@@ -1244,6 +1249,168 @@ if (cfg.socialV2?.voice?.enabled !== false && cfg.socialV2?.tools?.sendVoice !==
         return { content: [{ type: 'text', text: serializeModelData(data) }] };
       } catch (error) {
         return { content: [{ type: 'text', text: `获取语音库失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+if (cfg.socialV2?.tools?.ocr !== false && cfg.socialV2?.ocr?.enabled !== false) {
+  server.tool(
+    'qq_ocr',
+    '识别某条 QQ 消息里图片上的文字（离线 OCR，用本机 Windows 中文 OCR 引擎）。什么时候用：图片被压缩后小字/长截图看不清、需要读图里的文字内容（聊天截图、公告、报错、表格、菜单、路牌、验证码以外的文本）时；先 qq_get_message_images 看图，看不清再用它。注意：① 只识别文字，不描述画面内容，画面有没有梗还是靠 qq_get_message_images 自己看；② 只支持中文（zh-Hans-CN），英文/数字也能连带认出来；③ 认出什么就说什么，识别不出来就如实说看不清，不要猜、不要编；④ 返回 text 是全部图片的文字合集，results 里是按图片分开的明细；⑤ 外语截图可以传 translate（true=译成中文，也可以给 en/ja/ko 等目标语言），返回 translation.text 是译文；translation.ok=false 说明翻译服务不可用，这时你要自己翻译原文，别把失败说成"没有文字"。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      messageId: z.string().describe('要识别的那条消息的 messageId 或 seq（图片所在消息）'),
+      lang: z.string().optional().describe('可选：OCR 语言，默认 zh-Hans-CN（本机只有中文引擎）'),
+      translate: z
+        .union([z.string(), z.boolean()])
+        .optional()
+        .describe('可选：识别完顺手翻译。true 或 "zh-CN" = 译成中文；也可给 en / ja / ko 等目标语言；不传就不翻译')
+    },
+    async ({ key, token, messageId, lang, translate }) => {
+      try {
+        const data = await agentApi('/api/socialV2/ocr', {
+          method: 'POST',
+          body: JSON.stringify({
+            key,
+            messageId: String(messageId),
+            ...(lang ? { lang: String(lang) } : {}),
+            ...(translate === undefined ? {} : { translate }),
+            token
+          }),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 180000
+        });
+        return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `OCR 失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+if (cfg.socialV2?.tools?.recall !== false) {
+  server.tool(
+    'qq_recall',
+    '撤回一条自己发出去的消息。什么时候用：说错话、发错图/表情、把不该说的内容发出去时立刻撤回。QQ 只允许撤回自己 2 分钟内的消息；不传 messageId 就撤本会话里我最近发的一条（桥接只记得自己发的，撤别人的必须显式给 messageId，且需要群管理员身份）。撤回失败不要反复重试，如实告诉对方"撤不回来了"。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      messageId: z.string().optional().describe('要撤回的消息 id；省略则撤回本会话里我最近发的一条')
+    },
+    async ({ key, token, messageId }) => {
+      try {
+        const data = await agentApi('/api/socialV2/recall', {
+          method: 'POST',
+          body: JSON.stringify({ key, token, ...(messageId ? { messageId: String(messageId) } : {}) }),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 60000
+        });
+        return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `撤回失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+if (cfg.socialV2?.tools?.like !== false) {
+  server.tool(
+    'qq_send_like',
+    '给某个 QQ 好友/群友的名片点赞（"戳一下赞"那种）。什么时候用：对方帮了忙、说了好笑的话、或者久没联系打个招呼时，顺手点赞比发一句话更轻。一次最多 10 个，同一个人每天有上限；别对刚加的人或陌生人用，也别连续刷。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号（当前对话）'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      userId: z.string().describe('要点赞的 QQ 号'),
+      times: z.number().optional().describe('点赞个数，1-10，默认 1')
+    },
+    async ({ key, token, userId, times }) => {
+      try {
+        const data = await agentApi('/api/socialV2/like', {
+          method: 'POST',
+          body: JSON.stringify({ key, token, userId: String(userId), ...(times ? { times } : {}) }),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 60000
+        });
+        return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `点赞失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+// ── 梗百科（qq_meme）：纯本地词库 + 在线兜底，不需要会话令牌 ──────────────
+let memeWikiPromise = null;
+const getMemeWiki = () => {
+  if (!memeWikiPromise) {
+    memeWikiPromise = (async () => {
+      const { createMemeWiki } = await import('./memewiki.js');
+      const wcfg = cfg.memewiki ?? {};
+      return createMemeWiki({
+        dbPath: String(wcfg.dbPath || path.join(ROOT, 'data', 'memewiki', 'memes.db')),
+        apiBase: wcfg.apiBase || '',
+        timeoutMs: Number(wcfg.timeoutMs) || 2500,
+        log: (line) => console.error(line)
+      });
+    })().catch((error) => {
+      memeWikiPromise = null;
+      throw error;
+    });
+  }
+  return memeWikiPromise;
+};
+
+if (cfg.memewiki?.enabled !== false && cfg.socialV2?.tools?.meme !== false) {
+  server.tool(
+    'qq_meme',
+    '查网络梗/黑话/流行语的词条（本地 6660 条梗百科，查不到会走 cnmeme.wiki 在线接口）。什么时候用：群里出现你不确定的新词、缩写、梗名，想知道什么意思/怎么接。返回用法、出处、例句；查到就自然接梗，别把典故科普给对方；查不到就如实说不知道，别编。',
+    {
+      query: z.string().describe('要查的词，例如「踢到铁板了」「喝大水」；传原词即可，不要带「什么梗」')
+    },
+    async ({ query }) => {
+      try {
+        const wiki = await getMemeWiki();
+        const result = await wiki.lookup(String(query ?? '').trim());
+        return { content: [{ type: 'text', text: serializeModelData({ query, hit: result.hit, source: result.source, text: result.text }) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `查询梗百科失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+if (cfg.socialV2?.tools?.admin !== false) {
+  server.tool(
+    'qq_admin',
+    '管理员专用：查看或修改 QQ 桥接白名单（只有管理员 ownerQQ 自己的会话能用，其他人的令牌会被拒绝）。什么时候用：管理员明确要求「把某人加进来 / 踢出去 / 看看名单」时。op=get 只读；op=whitelist 改名单，配合 kind（private|group）与 add / remove（单个数或数组），ids 是整体覆盖（慎用）。改完把结果如实告诉对方，别不声不响地改；被拒绝就把错误原样说出来，不要重试。',
+    {
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      op: z.enum(['get', 'whitelist']).describe('get=查看当前白名单；whitelist=修改'),
+      kind: z.enum(['private', 'group']).optional().describe('改哪种名单，默认 private'),
+      add: z.union([z.string(), z.number(), z.array(z.union([z.string(), z.number()]))]).optional().describe('要加入的 QQ 号/群号'),
+      remove: z.union([z.string(), z.number(), z.array(z.union([z.string(), z.number()]))]).optional().describe('要移出的 QQ 号/群号'),
+      ids: z.array(z.union([z.string(), z.number()])).optional().describe('整体覆盖成这个列表（慎用）')
+    },
+    async ({ token, op, kind, add, remove, ids }) => {
+      try {
+        const data = await agentApi('/api/admin/config', {
+          method: 'POST',
+          body: JSON.stringify({
+            token,
+            op,
+            ...(kind ? { kind } : {}),
+            ...(add !== undefined ? { add } : {}),
+            ...(remove !== undefined ? { remove } : {}),
+            ...(ids !== undefined ? { ids } : {})
+          }),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 60000
+        });
+        return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `管理操作失败：${error?.message ?? error}` }], isError: true };
       }
     }
   );

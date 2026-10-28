@@ -140,7 +140,11 @@
       "stickerNote": true,
       "collectSticker": true,
       "getSelfImage": true,
-      "sendVoice": false
+      "sendVoice": false,
+      "ocr": true,
+      "recall": true,
+      "like": true,
+      "meme": true
     },
     "wake": {
       "defaultMode": "diving",
@@ -263,6 +267,13 @@
       "gifFrames": 6,
       "gifTile": 240,
       "normalizeTimeoutMs": 25000
+    },
+    "ocr": {
+      "enabled": true,
+      "lang": "zh-Hans-CN",
+      "maxImages": 3,
+      "scale": 0,
+      "timeoutMs": 45000
     }
   },
   "webSearch": {
@@ -275,5 +286,12 @@
     "maxTokens": 4096,
     "maxResults": 8,
     "timeoutMs": 35000
+  },
+  "memewiki": {
+    "enabled": true,
+    "dbPath": "",
+    "apiBase": "",
+    "timeoutMs": 2500,
+    "autoPrefetch": true
   }
 }
