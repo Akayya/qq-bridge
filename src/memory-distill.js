@@ -9,11 +9,11 @@ import { MEMORY_KINDS } from './shared-memory.js';
 
 export const DISTILL_RULES = [
   { id: 'preference', kind: 'preference', label: '偏好', auto: true,
-    re: /(我|俺|咱)(最|超|特别|挺|很|一般|平时)?(喜欢|爱|讨厌|烦|不吃|不喝|不碰|只喝|只吃|习惯|受不了|偏好|迷上)/u },
+    re: /(我|俺|咱)(最|超|特别|挺|很|一般|平时|一直|从来)?(喜欢|偏好|爱|讨厌|烦|不吃|不喝|不碰|只喝|只吃|习惯|受不了|迷上)/u },
   { id: 'bond', kind: 'bond', label: '关系', auto: true,
-    re: /(我(的)?(老婆|老公|对象|女朋友|男朋友|妈|爸|哥|姐|弟|妹|儿子|女儿|闺女|同事|老板|室友|朋友|同桌|师父|师傅))|我养了|我家(有|养)/u },
+    re: /(我(的)?(老婆|老公|对象|女朋友|男朋友|妈|爸|哥|姐|弟|妹|儿子|女儿|闺女|同事|老板|室友|同桌|师父|师傅))|我(养了|家(有|养))/u },
   { id: 'rule', kind: 'rule', label: '约定', auto: true,
-    re: /(以后|下次|别再|不要(再)?|记得|答应|说好了|约定|不准|必须|每次)/u },
+    re: /^(记住|以后|下次|答应|说好了|约定|不准|必须|别再|不要(再)?[^。！？]{0,12}(说|做|发|问|提))/u },
   { id: 'fact', kind: 'fact', label: '事实', auto: false,
     re: /(我(是|在|住|叫|今年|做|干)|生日|(\d{1,3})岁|住在|工作在|在.{2,10}(上班|工作|上学)|毕业|大学|高中|初中|老家)/u }
 ];
@@ -22,6 +22,9 @@ const AUTO_MAX_PER_RUN = 2;
 const PREVIEW_MAX = 8;
 const MIN_LEN = 6;
 const MAX_LEN = 160;
+
+// 疑问句不是记忆：「记得昨天干了什么吗」「你吃了吗」这类要整句丢掉。
+const INTERROGATIVE = /[吗呢嘛]$|什么|怎么|咋样|为什么|为啥|哪个|哪家|谁|多少|是不是|有没有/u;
 
 const normalize = (s) => String(s ?? '')
   .replace(/\[[^\]]*\]/g, ' ')
@@ -37,7 +40,7 @@ function pickSentence(text, re) {
   if (!raw) return '';
   const parts = raw.split(/[。！？!?；;\n]+/u).map((p) => p.trim()).filter(Boolean);
   for (const part of parts) {
-    if (re.test(part) && part.length >= MIN_LEN) return part;
+    if (re.test(part) && part.length >= MIN_LEN && !INTERROGATIVE.test(part)) return part;
   }
   return '';
 }

@@ -98,6 +98,17 @@ function distillTests() {
   const dedup = extractCandidates({ messages, existing: ['我最喜欢喝冰美式了'], key: OWNER });
   ok(!dedup.some((c) => c.text.includes('冰美式')), '已有相似条目会被跳过');
 
+  // 疑问句不是记忆：这两句在真实聊天日志里曾被抓成「约定」，属于误报
+  const q = extractCandidates({
+    messages: [
+      { seq: 1, sender: '2086366020', text: '记得昨天干了什么吗' },
+      { seq: 2, sender: '616468161', text: '你今天吃了吗' },
+      { seq: 3, sender: '2086366020', text: '以后记得提醒我喝药' }
+    ],
+    existing: [], key: OWNER
+  });
+  ok(q.length === 1 && q[0].text.includes('喝药'), '疑问句被丢弃、陈述句保留', JSON.stringify(q.map((c) => c.text)));
+
   const preview = distiller.preview({ key: OWNER, messages, existing: [] });
   ok(preview.ok && preview.candidates.length === cand.length, 'preview 不写库（条数一致）');
   ok(mem.listAll({ limit: 50 }).length === 0, 'preview 之后库还是空的');
