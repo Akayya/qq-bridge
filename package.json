@@ -69,6 +69,7 @@
     "test:memewiki": "node scripts/test-memewiki.mjs",
     "test:shared-memory": "node scripts/test-shared-memory.mjs",
     "test:effort": "node scripts/test-effort-support.mjs",
+    "backup:memory": "node scripts/backup-memory.mjs",
     "import:memories": "node scripts/import-memories.mjs"
   },
   "dependencies": {
