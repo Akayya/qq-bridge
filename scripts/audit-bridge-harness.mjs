@@ -186,6 +186,53 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     NodeApiClient: class { constructor() { return api; } },
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
+    // 这些模块是实现细节（表情库 / 共享记忆 / 档案 / 提炼），审计测试关心的是闸门与安全决策，
+    // 给最小桩即可；否则 bridge.js 里的调用会撞 ReferenceError 让整份审计跑不起来。
+    createNekowhaleStickers: () => ({
+      digest: (text) => ({ text, stickers: [] }),
+      getKit: () => null,
+      pluginDir: '',
+      dataDir: ''
+    }),
+    createSharedMemory: () => ({
+      append: () => ({ ok: false, error: 'stub' }),
+      listFor: () => [],
+      injectFor: () => '',
+      injectBundle: () => ({ text: '', relatedText: '', injectedIds: [], relatedIds: [] }),
+      search: () => [],
+      relatedFor: () => [],
+      remove: () => false,
+      listAll: () => [],
+      countByScope: () => ({ total: 0, all: 0, groups: 0, owner: 0, key: 0 }),
+      stats: () => ({ total: 0 }),
+      importMany: () => ({ imported: 0, skipped: 0 }),
+      close: () => {}
+    }),
+    createProfiles: () => ({
+      updatePerson: () => null,
+      updateGroup: () => null,
+      personOf: () => null,
+      groupOf: () => null,
+      remove: () => false,
+      formatFor: () => '',
+      list: () => ({ people: [], groups: [] }),
+      stats: () => ({ people: 0, groups: 0 })
+    }),
+    createDistiller: () => ({
+      preview: () => ({ candidates: [], skipped: [] }),
+      apply: () => ({ written: 0, skipped: [] })
+    }),
+    extractCandidates: () => [],
+    createMemeWiki: () => ({
+      ready: () => false,
+      lookup: () => null,
+      search: () => [],
+      remember: () => ({ ok: false, error: 'stub' }),
+      stats: () => ({ total: 0 })
+    }),
+    createTranslator: () => ({ translate: async (text) => ({ ok: false, text, error: 'stub' }) }),
+    translateText: async (text) => ({ ok: false, text, error: 'stub' }),
+    ocrImage: async () => ({ ok: false, error: 'stub' }),
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt,
     // 桥接的出图出口会调归一化（体积/动图抽帧）：VM 里必须能拿到这几个函数。

@@ -444,6 +444,8 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
             default: 'max',
             providerDefault: 'high',
             catalogSource: 'dsh',
+            effortSupported: true,
+            effortSource: 'catalog',
             globalSideEffect: true,
           });
           case '/api/whitelist': return json(state.whitelist);

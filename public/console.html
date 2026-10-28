@@ -3022,6 +3022,9 @@ async function refreshDshModel() {
     document.getElementById('dshProviderText').textContent = r.provider || '-';
     const select = document.getElementById('dshEffortSelect');
     const labels = r.labels || {};
+    // 当前通道不支持 reasoningEffort（第三方 OpenAI 兼容通道常见）：灰掉开关并说明原因，
+    // 否则管理员会以为「选了 max 就真的跑 max」，其实桥接已按模型默认强度发送。
+    const supported = r.effortSupported !== false;
     select.replaceChildren();
     for (const option of (r.options || [])) {
       const el = document.createElement('option');
@@ -3033,7 +3036,16 @@ async function refreshDshModel() {
       select.appendChild(el);
     }
     select.value = r.reasoningEffort;
+    select.disabled = !supported;
+    const saveBtn = document.getElementById('dshEffortSave');
+    if (saveBtn) saveBtn.disabled = !supported;
     const parts = [];
+    if (!supported) {
+      const why = r.effortSource === 'runtime'
+        ? '该通道不接受 reasoningEffort（实测报过 does not support reasoning effort）'
+        : '该模型没有公布思考强度档位';
+      parts.push(`⚠️ 当前模型 ${r.provider}/${r.model} 不支持思考强度：${why}，运行时固定按模型默认强度发送，下面的开关对它无效`);
+    }
     if (r.providerDefault) parts.push(`DSH 出厂默认是 ${r.providerDefault}`);
     parts.push(r.catalogSource === 'dsh' ? '档位取自 DSH 实际公布的能力' : '未能读取 DSH 能力，档位为内置清单');
     document.getElementById('dshEffortNote').textContent = parts.join('；') + '。';
@@ -3211,8 +3223,14 @@ document.getElementById('roleInjectMaxSave').addEventListener('click', async () 
 
 // ── DSH 思考强度 ────────────────────────────────────────────────────────────
 document.getElementById('dshEffortSave').addEventListener('click', async () => {
-  const effort = document.getElementById('dshEffortSelect').value;
+  const selectEl = document.getElementById('dshEffortSelect');
+  const effort = selectEl.value;
   const msg = document.getElementById('dshEffortMsg');
+  if (selectEl.disabled) {
+    msg.textContent = '⚠️ 当前模型不支持思考强度，开关对它无效（按模型默认强度发送）';
+    msg.className = 'meta err';
+    return;
+  }
   msg.textContent = '保存中…';
   msg.className = 'meta';
   const r = await api('/api/dsh/effort', 'POST', { reasoningEffort: effort });
