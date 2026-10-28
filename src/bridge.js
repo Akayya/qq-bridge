@@ -6796,7 +6796,13 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_query' }, 403); return; }
           const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit')) || 30));
+          const q = String(url.searchParams.get('q') ?? '').trim();
           const mem = getSharedMemory();
+          if (q) {
+            const hits = mem.search(q, { key, limit });
+            sendJson({ ok: true, key, q, count: hits.length, entries: hits, stats: mem.stats() });
+            return;
+          }
           const entries = mem.listFor(key, { limit });
           sendJson({ ok: true, key, count: entries.length, entries, stats: mem.stats() });
           return;
@@ -10821,9 +10827,23 @@ async function main() {
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
     const memoryText = formatMemoryV2(st);
     const memoryLine = memoryText ? `${memoryText}\n\n` : '';
-    // 跨聊天共享记忆：按 scope 过滤后注入（≤20 条 / 800 字），并把命中的条目 used_at 推进。
-    const sharedMemoryText = getSharedMemory().injectFor(key);
-    const sharedMemoryLine = sharedMemoryText ? `${sharedMemoryText}\n\n` : '';
+    // 跨聊天共享记忆：常驻 LRU（≤20 条 / 800 字）+ 与最近来信相关的旧条目（3 字窗口比对）。
+    const recentIncoming = (Array.isArray(st.recentMessages) ? st.recentMessages : [])
+      .filter((m) => m && !m.isSelf)
+      .slice(-3)
+      .map((m) => String(m.text || m.plain || m.tail || ''))
+      .join(' ')
+      .slice(0, 400);
+    const sharedBundle = (() => {
+      try {
+        return getSharedMemory().injectBundle(key, { recentText: recentIncoming });
+      } catch (error) {
+        log(`⚠️ 共享记忆注入失败：${error?.message ?? error}`);
+        return { text: '', relatedText: '' };
+      }
+    })();
+    const sharedMemoryLine = sharedBundle.text ? `${sharedBundle.text}\n\n` : '';
+    const relatedMemoryLine = sharedBundle.relatedText ? `${sharedBundle.relatedText}\n\n` : '';
     // 注意：黑话表不在这里注入，deliverPromptNow 的 withSlangContext 会统一注入，
     // 避免唤醒 prompt 出现两份黑话表。
     const participationText = formatParticipationV2(st);
@@ -10873,7 +10893,7 @@ async function main() {
     const crossChatLine = key === (cfg.ownerQQ ? `private:${Number(cfg.ownerQQ)}` : '')
       ? '【跨聊天操作】你是管理员会话：管理员让你去别的聊天（某群 / 某人私聊）读消息、发消息、撤回、点赞、识别图片时，直接把目标会话 key（group:群号 或 private:QQ号）传给对应工具、令牌仍用上面的【会话令牌】即可；桥接只放行白名单内的聊天，被拒绝就如实说「那个聊天不在白名单」。没有管理员指令时不要主动跑去别的聊天发言。\n\n'
       : '';
-    const base = roleLine + identityLine + tokenLine + crossChatLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + sharedMemoryLine + participationLine + preSleepLine + timeSenseLine;
+    const base = roleLine + identityLine + tokenLine + crossChatLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + sharedMemoryLine + relatedMemoryLine + participationLine + preSleepLine + timeSenseLine;
     // 唤醒原因里的那条消息本身多旧：`atMention@seq194` 这种形态能反查到原消息。
     const triggeredSeq = wakeReasonSeq(reason);
     const triggeredMsg = triggeredSeq ? findV2MessageBySeq(st, triggeredSeq) : null;

@@ -22,10 +22,11 @@ function unitTests() {
   console.log('\n[1] 模块单测（临时库）');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shm-'));
   const dbPath = path.join(dir, 'memory.db');
+  const logs = [];
   const mem = createSharedMemory({
     dbPath,
     ownerQQ: 2086366020,
-    log: () => {},
+    log: (m) => logs.push(String(m)),
     sanitize: (t) => String(t),
     isSensitive: (t) => /accessToken\s*[:=]/i.test(t)
   });
@@ -88,6 +89,33 @@ function unitTests() {
   const st = mem.stats();
   ok(st.ok && st.total > 0 && st.byScope && Object.keys(st.byScope).length >= 3, 'stats 按 scope 分组', JSON.stringify(st.byScope));
 
+  // FTS5 / 关键词检索（第二步）
+  const s1 = mem.append({ text: '管理员养了只猫叫年糕，橘色胖猫', scope: 'all', sourceKey: OWNER });
+  ok(s1.ok, '写入一条用于检索的记忆');
+  const rLong = mem.search('猫叫年糕', { key: OWNER });
+  ok(rLong.length >= 1 && rLong[0].text.includes('年糕'), 'FTS5 三字以上中文命中', JSON.stringify(rLong.map((x) => x.text)));
+  const rShort = mem.search('年糕', { key: OWNER });
+  ok(rShort.length >= 1, '两字关键词回退 LIKE 命中', JSON.stringify(rShort.map((x) => x.text)));
+  ok(mem.search('年糕', { key: OTHER_PRIVATE }).length >= 1, 'scope=all 的条目对他人私聊也能检索到');
+  const priv = mem.append({ text: '别人私聊的糗事：被猫抓了', sourceKey: OTHER_PRIVATE });
+  ok(priv.ok && mem.search('糗事', { key: GROUP }).length === 0, '检索同样遵守 scope（别人的 key 条目查不到）');
+  ok(mem.search('不存在的东西呀', { key: OWNER }).length === 0, '查不到时返回空');
+  ok(mem.search('年糕', { key: OWNER })[0].hits >= 1, '检索会累加 hits');
+  ok(!logs.some((l) => l.includes('检索失败')), 'FTS 查询没有回退到 LIKE（没有报错日志）', logs.filter((l) => l.includes('检索失败')).join(' / '));
+  ok(logs.some((l) => l.includes('FTS5')), '首次打开时建了 FTS5 索引并回填');
+
+  // 相关记忆：3 字窗口比对，能把「掉出 LRU 的旧记忆」翻回来
+  const rel = mem.relatedFor(OWNER, '你家那只年糕最近还胖吗', { limit: 3 });
+  ok(rel.some((e) => e.text.includes('年糕')), '相关记忆能按来信关键词翻出旧条目', JSON.stringify(rel.map((x) => x.text)));
+  ok(mem.relatedFor(OTHER_PRIVATE, '你家那只年糕最近还胖吗', { limit: 5 }).every((e) => e.scope !== `key:${OWNER}`), '相关记忆也遵守 scope');
+  mem.append({ text: '群主的猫叫年糕，特别能吃', sourceKey: GROUP });
+  for (let n = 0; n < 22; n += 1) mem.append({ text: `填充记忆 ${n} `.padEnd(30, 'y'), sourceKey: GROUP });
+  const relBundle = mem.injectBundle(GROUP, { recentText: '你家年糕还吃那么多吗' });
+  ok(/年糕/.test(relBundle.relatedText), 'LRU 之外的旧记忆能被【相关记忆】翻出来', relBundle.relatedText.slice(0, 80));
+  ok(!/年糕/.test(relBundle.text), '同一条不会同时又出现在常驻注入里');
+  ok(relBundle.text.startsWith('【共享记忆】') && relBundle.relatedText.startsWith('【相关记忆】'), 'injectBundle 同时给出常驻与相关两段');
+  ok(!relBundle.relatedIds.some((id) => relBundle.injectedIds.includes(id)), '相关记忆与常驻注入不重复');
+
   mem.close();
   fs.rmSync(dir, { recursive: true, force: true });
 }
@@ -145,6 +173,17 @@ async function httpTests() {
 
   const after = await get(`/api/socialV2/memory-global?key=${encodeURIComponent(OWNER)}&limit=50`, { 'x-agent-token': ownerToken });
   ok(!after.data.entries?.some((x) => x.text.includes(marker)), '删除后查不到了');
+
+  // 关键词检索（第二步）：q 参数走 FTS5 / LIKE
+  const w2 = await post('/api/socialV2/memory-global', { key: OWNER, text: `${marker}：我家那只年糕最近又胖了两斤`, kind: 'fact', scope: 'all', tags: ['自检', '猫'] }, { 'x-agent-token': ownerToken });
+  ok(w2.status === 200 && w2.data.ok, '写入检索用条目', JSON.stringify(w2.data));
+  const qLong = await get(`/api/socialV2/memory-global?key=${encodeURIComponent(OWNER)}&q=${encodeURIComponent('那只年糕')}`, { 'x-agent-token': ownerToken });
+  ok(qLong.status === 200 && qLong.data.count >= 1 && qLong.data.entries?.some((x) => x.text.includes(marker)), 'q=三字中文命中（FTS5）', JSON.stringify(qLong.data).slice(0, 160));
+  const qShort = await get(`/api/socialV2/memory-global?key=${encodeURIComponent(OWNER)}&q=${encodeURIComponent('年糕')}`, { 'x-agent-token': ownerToken });
+  ok(qShort.status === 200 && qShort.data.count >= 1, 'q=两字中文命中（LIKE 回退）', JSON.stringify(qShort.data).slice(0, 160));
+  const qMiss = await get(`/api/socialV2/memory-global?key=${encodeURIComponent(OWNER)}&q=${encodeURIComponent('绝对不存在的词啊')}`, { 'x-agent-token': ownerToken });
+  ok(qMiss.status === 200 && qMiss.data.count === 0, 'q 查不到时 count=0');
+  if (w2.data.id) await post('/api/socialV2/memory-global-remove', { key: OWNER, id: w2.data.id }, { 'x-agent-token': ownerToken });
 }
 
 unitTests();

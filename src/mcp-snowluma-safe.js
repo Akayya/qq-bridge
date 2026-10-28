@@ -955,12 +955,14 @@ server.tool(
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'global']).optional().describe('可选：只看某一类记忆；global = 跨聊天共享记忆（只会返回当前聊天有权看到的条目）')
+    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'global']).optional().describe('可选：只看某一类记忆；global = 跨聊天共享记忆（只会返回当前聊天有权看到的条目）'),
+    q: z.string().optional().describe('仅 category=global 有效：按关键词/短语检索共享记忆（中文 ≥3 字走全文索引，1~2 字走模糊匹配）；不传则按最近使用列出')
   },
-  async ({ key, token, category }) => {
+  async ({ key, token, category, q }) => {
     try {
       if (category === 'global') {
         const gq = new URLSearchParams({ key, limit: '30' });
+        if (q && String(q).trim()) gq.set('q', String(q).trim());
         const gdata = await agentApi(`/api/socialV2/memory-global?${gq.toString()}`, { headers: { 'x-agent-token': token } });
         return { content: [{ type: 'text', text: serializeModelData(gdata) }] };
       }
