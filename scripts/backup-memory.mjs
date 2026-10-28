@@ -24,7 +24,8 @@ const valueOf = (flag, fallback) => {
 };
 
 const REPO_DIR = path.resolve(valueOf('--dir', process.env.BRIDGE_MEMORY_BACKUP_DIR || 'D:\\DSH_MEMORY_BACKUP'));
-const KEEP_DAYS = Number(valueOf('--keep-days', '60')) || 60;
+// 0（或负数）= 不清理历史，永久保留每日快照
+const KEEP_DAYS = Math.max(0, Number(valueOf('--keep-days', '60')) || 0);
 const NO_PUSH = has('--no-push');
 const STATE_DIR = path.join(ROOT, 'state');
 const SNAP_DIR = path.join(REPO_DIR, 'snapshots');
@@ -81,6 +82,7 @@ function readLightMemory() {
 }
 
 function pruneOldSnapshots() {
+  if (!KEEP_DAYS) return 0; // 0 = 永久保留
   if (!fs.existsSync(SNAP_DIR)) return 0;
   const cutoff = Date.now() - KEEP_DAYS * 86400000;
   let removed = 0;

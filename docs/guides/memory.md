@@ -56,7 +56,10 @@
 node scripts/backup-memory.mjs              # 导出 + commit + push
 node scripts/backup-memory.mjs --no-push    # 只导出
 node scripts/backup-memory.mjs --dir D:\x   # 指定本地仓库目录（默认 D:\DSH_MEMORY_BACKUP）
+node scripts/backup-memory.mjs --keep-days 0 # 不清理历史快照（默认保留 60 天）
 ```
+
+> 清理只删「每日历史快照文件」，`latest.json` 永远是最新全量；记忆本身在 `state/memory.db` 里不受影响。
 
 ## 测试
 ```bash
