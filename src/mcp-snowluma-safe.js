@@ -968,9 +968,11 @@ server.tool(
         const gdata = await agentApi(`/api/socialV2/memory-global?${gq.toString()}`, { headers: { 'x-agent-token': token } });
         return { content: [{ type: 'text', text: serializeModelData(gdata) }] };
       }
-      const q = new URLSearchParams({ key });
-      if (category) q.set('category', category);
-      const data = await agentApi(`/api/socialV2/memory?${q.toString()}`, { headers: { 'x-agent-token': token } });
+      // 注意：这里的局部变量不能叫 q —— 工具参数里已经有 q，同名 const 会把它推进 TDZ，
+      // 上面的 `if (q && ...)` 就会抛 "Cannot access 'q' before initialization"。
+      const qs = new URLSearchParams({ key });
+      if (category) qs.set('category', category);
+      const data = await agentApi(`/api/socialV2/memory?${qs.toString()}`, { headers: { 'x-agent-token': token } });
       return { content: [{ type: 'text', text: serializeModelData(data) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `记忆读取失败：${error?.message ?? error}` }], isError: true };
