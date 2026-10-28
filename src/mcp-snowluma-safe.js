@@ -914,8 +914,11 @@ server.tool(
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression']).describe('记忆类别'),
-    content: z.string().describe('记忆内容，例如话题、想说的话、对某人的印象标签'),
+    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'global']).describe('记忆类别：前三种是当前聊天的短期记忆；global 是跨聊天的长期共享记忆（默认只有本聊天可见，scope 控制谁能看到）'),
+    content: z.string().describe('记忆内容，例如话题、想说的话、对某人的印象标签、或一条长期事实'),
+    scope: z.enum(['all', 'groups', 'owner', 'key']).optional().describe('仅 category=global 有效：all=所有聊天可见（只有管理员私聊能写）、groups=所有群可见、owner=只有管理员私聊可见、key=只有当前聊天可见（默认）'),
+    kind: z.enum(['fact', 'preference', 'bond', 'rule']).optional().describe('仅 category=global 有效：条目类型，fact=事实、preference=偏好、bond=与某人的关系、rule=相处规则，默认 fact'),
+    tags: z.array(z.string()).optional().describe('仅 category=global 有效：便于以后检索的标签，最多 5 个'),
     extra: z.object({
       target: z.string().optional().describe('memberImpression 时的群友名字/昵称'),
       participants: z.array(z.string()).optional().describe('activeTopic 的参与者列表'),
@@ -924,8 +927,16 @@ server.tool(
       expiresAtMs: z.number().optional().describe('pendingThought 过期毫秒数，默认 2 小时')
     }).optional().describe('附加信息')
   },
-  async ({ key, token, category, content, extra }) => {
+  async ({ key, token, category, content, scope, kind, tags, extra }) => {
     try {
+      if (category === 'global') {
+        const data = await agentApi('/api/socialV2/memory-global', {
+          method: 'POST',
+          body: JSON.stringify({ key, text: content, kind: kind || 'fact', scope: scope === 'key' ? '' : (scope || ''), tags: tags || [] }),
+          headers: { 'x-agent-token': token }
+        });
+        return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      }
       const data = await agentApi('/api/socialV2/memory-append', {
         method: 'POST',
         body: JSON.stringify({ key, category, content, extra: extra || {} }),
@@ -940,14 +951,19 @@ server.tool(
 
 server.tool(
   'qq_memory_query',
-  '查看当前会话的轻量记忆：进行中的话题、你想说但还没说的话、对群友的印象（只读）。',
+  '查看当前会话的记忆：轻量记忆（进行中的话题、你想说但还没说的话、对群友的印象）或跨聊天的长期共享记忆（category=global）。（只读）',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression']).optional().describe('可选：只看某一类记忆')
+    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'global']).optional().describe('可选：只看某一类记忆；global = 跨聊天共享记忆（只会返回当前聊天有权看到的条目）')
   },
   async ({ key, token, category }) => {
     try {
+      if (category === 'global') {
+        const gq = new URLSearchParams({ key, limit: '30' });
+        const gdata = await agentApi(`/api/socialV2/memory-global?${gq.toString()}`, { headers: { 'x-agent-token': token } });
+        return { content: [{ type: 'text', text: serializeModelData(gdata) }] };
+      }
       const q = new URLSearchParams({ key });
       if (category) q.set('category', category);
       const data = await agentApi(`/api/socialV2/memory?${q.toString()}`, { headers: { 'x-agent-token': token } });
@@ -960,16 +976,25 @@ server.tool(
 
 server.tool(
   'qq_memory_remove',
-  '删除一条轻量记忆：activeTopic/pendingThought 用 content 匹配原文删除；memberImpression 用 target 参数指定群友名字删除。',
+  '删除一条记忆：轻量记忆用 content/target 匹配删除；跨聊天共享记忆（category=global）用 id 或 content 删除。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression']).describe('记忆类别'),
-    content: z.string().optional().describe('要删除的话题/想法原文（memberImpression 不需要）'),
-    target: z.string().optional().describe('memberImpression 时要删除的群友名字')
+    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'global']).describe('记忆类别；global = 跨聊天共享记忆'),
+    content: z.string().optional().describe('要删除的话题/想法原文（memberImpression 不需要；global 时可配合 id 使用）'),
+    target: z.string().optional().describe('memberImpression 时要删除的群友名字'),
+    id: z.number().optional().describe('仅 category=global 有效：共享记忆条目的 id（来自 qq_memory_query category=global）')
   },
-  async ({ key, token, category, content, target }) => {
+  async ({ key, token, category, content, target, id }) => {
     try {
+      if (category === 'global') {
+        const gdata = await agentApi('/api/socialV2/memory-global-remove', {
+          method: 'POST',
+          body: JSON.stringify({ key, id: id || undefined, text: content || '' }),
+          headers: { 'x-agent-token': token }
+        });
+        return { content: [{ type: 'text', text: serializeModelData(gdata) }] };
+      }
       const data = await agentApi('/api/socialV2/memory-remove', {
         method: 'POST',
         body: JSON.stringify({ key, category, content: content || '', target: target || '' }),

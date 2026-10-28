@@ -58,10 +58,13 @@ import { createNekowhaleStickers, readStickerFile } from './nekowhale.js';
 import { ocrImageBuffer, extFromMime } from './ocr.js';
 import { translateText } from './translate.js';
 import { createMemeWiki } from './memewiki.js';
+import { createSharedMemory } from './shared-memory.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const STATE_DIR = path.join(ROOT, 'state');
+// 跨聊天共享记忆（SQLite）：模块级单例，首次用到时在 getSharedMemory() 里懒初始化。
+let sharedMemoryInstance = null;
 const STATE_FILE = path.join(STATE_DIR, 'sessions.json');
 const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
 const SLANG_FILE = path.join(STATE_DIR, 'slang.json');
@@ -4864,6 +4867,20 @@ async function main() {
           });
           return;
         }
+        // 唤醒提示预览：把这条聊天「下一次被唤醒时模型收到的完整提示词」原样返回，
+        // 方便排查注入内容（记忆/黑话/表情/跨聊天说明）。只有控制台令牌能调，不对外。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/prompt-preview') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          const reason = String(url.searchParams.get('reason') ?? 'preview');
+          let prompt = '';
+          try { prompt = buildWakePromptV2(key, reason); } catch (error) {
+            sendJson({ ok: false, error: `生成提示词失败：${error?.message ?? error}` }, 500);
+            return;
+          }
+          sendJson({ ok: true, key, reason, chars: prompt.length, prompt });
+          return;
+        }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/unread') {
           const key = String(url.searchParams.get('key') ?? '').trim();
           const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 30));
@@ -6745,6 +6762,56 @@ async function main() {
             log(`群成员查询失败 ${key}: ${error?.message ?? error}`);
             sendJson({ ok: false, error: `获取群成员失败：${error?.message ?? error}` }, 500);
           }
+          return;
+        }
+        // ── 跨聊天共享记忆（state/memory.db）──────────────────────────────────
+        // 与上面 conversation 内的轻量记忆分开：这类条目跨聊天可见（由 scope 决定），
+        // 不随会话重置丢失；注入时机见 buildWakePromptV2 的 sharedMemoryLine。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-global') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const text = String(body.text ?? '').trim();
+          const kind = String(body.kind ?? '').trim() || 'fact';
+          const scope = body.scope === undefined || body.scope === null ? '' : String(body.scope).trim();
+          const tags = body.tags;
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (!text) { sendJson({ ok: false, error: 'text 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOkAny(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: agentTokenErrText(key, req.headers['x-agent-token']) }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_append' }, 403); return; }
+          const r = getSharedMemory().append({ kind, text, scope, sourceKey: key, tags });
+          if (!r.ok) {
+            const privacy = /只有管理员私聊|只能指向当前会话自己/.test(r.error);
+            sendJson({ ok: false, error: r.error }, privacy ? 403 : 400);
+            return;
+          }
+          log(`共享记忆：${key} 写入 [${r.kind}/${r.scope}] ${r.text.slice(0, 40)}`);
+          sendJson({ ok: true, id: r.id, kind: r.kind, scope: r.scope, downgradedFrom: r.downgradedFrom || null, text: r.text });
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/memory-global') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOkAny(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: agentTokenErrText(key, req.headers['x-agent-token']) }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_query' }, 403); return; }
+          const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit')) || 30));
+          const mem = getSharedMemory();
+          const entries = mem.listFor(key, { limit });
+          sendJson({ ok: true, key, count: entries.length, entries, stats: mem.stats() });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-global-remove') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOkAny(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: agentTokenErrText(key, req.headers['x-agent-token']) }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_remove' }, 403); return; }
+          const r = getSharedMemory().remove({ id: body.id, text: body.text });
+          if (!r.ok) { sendJson({ ok: false, error: r.error }, 400); return; }
+          log(`共享记忆：${key} 删除 ${r.removed} 条`);
+          sendJson({ ok: true, key, removed: r.removed });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-append') {
@@ -9204,6 +9271,23 @@ async function main() {
     return defaultMs;
   }
 
+  // 跨聊天共享记忆库（state/memory.db）：懒初始化，只建一次连接。
+  // 隐私策略在 shared-memory.js 里：默认只有本会话可见，all 只允许管理员私聊写入。
+  function getSharedMemory() {
+    if (sharedMemoryInstance) return sharedMemoryInstance;
+    sharedMemoryInstance = createSharedMemory({
+      dbPath: path.join(STATE_DIR, 'memory.db'),
+      ownerQQ: Number(cfg.ownerQQ) || null,
+      log,
+      // 凭据/令牌先打码再入库，避免把 accessToken 之类的原文存进长期记忆。
+      sanitize: (t) => redactSensitiveText(t),
+      // 允许存本地路径（bot 可能真的要记住项目位置），但拒绝凭据类文本：
+      // 先把盘符路径摘掉再测 SENSITIVE_RE，剩下的命中就是 token=xxx / /home/… 这类。
+      isSensitive: (t) => SENSITIVE_RE.test(String(t ?? '').replace(/[A-Za-z]:[\\/][^\s"'<>|]*/g, ''))
+    });
+    return sharedMemoryInstance;
+  }
+
   function formatMemoryV2(st) {
     if (!st) return '';
     const lines = [];
@@ -10737,6 +10821,9 @@ async function main() {
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
     const memoryText = formatMemoryV2(st);
     const memoryLine = memoryText ? `${memoryText}\n\n` : '';
+    // 跨聊天共享记忆：按 scope 过滤后注入（≤20 条 / 800 字），并把命中的条目 used_at 推进。
+    const sharedMemoryText = getSharedMemory().injectFor(key);
+    const sharedMemoryLine = sharedMemoryText ? `${sharedMemoryText}\n\n` : '';
     // 注意：黑话表不在这里注入，deliverPromptNow 的 withSlangContext 会统一注入，
     // 避免唤醒 prompt 出现两份黑话表。
     const participationText = formatParticipationV2(st);
@@ -10786,7 +10873,7 @@ async function main() {
     const crossChatLine = key === (cfg.ownerQQ ? `private:${Number(cfg.ownerQQ)}` : '')
       ? '【跨聊天操作】你是管理员会话：管理员让你去别的聊天（某群 / 某人私聊）读消息、发消息、撤回、点赞、识别图片时，直接把目标会话 key（group:群号 或 private:QQ号）传给对应工具、令牌仍用上面的【会话令牌】即可；桥接只放行白名单内的聊天，被拒绝就如实说「那个聊天不在白名单」。没有管理员指令时不要主动跑去别的聊天发言。\n\n'
       : '';
-    const base = roleLine + identityLine + tokenLine + crossChatLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + participationLine + preSleepLine + timeSenseLine;
+    const base = roleLine + identityLine + tokenLine + crossChatLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + sharedMemoryLine + participationLine + preSleepLine + timeSenseLine;
     // 唤醒原因里的那条消息本身多旧：`atMention@seq194` 这种形态能反查到原消息。
     const triggeredSeq = wakeReasonSeq(reason);
     const triggeredMsg = triggeredSeq ? findV2MessageBySeq(st, triggeredSeq) : null;
