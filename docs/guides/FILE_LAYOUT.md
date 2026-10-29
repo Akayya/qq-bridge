@@ -1,9 +1,9 @@
 # 目录与文件约定
 
-桥接在 `D:\DSH_QQ_BOT` 下自成一个完整部署，所有东西都在这一个目录里（除了 DSH 侧的 profile 与 SnowLuma 本体）。
+桥接在 `D:/DSH_QQ_BOT` 下自成一个完整部署，所有东西都在这一个目录里（除了 DSH 侧的 profile 与 SnowLuma 本体）。文档里统一用正斜杠写路径——Node 与 ffmpeg 在 Windows 上都认，`config.json` 里也是这么写的。
 
 ```
-D:\DSH_QQ_BOT\
+D:/DSH_QQ_BOT/
 ├─ src\                 程序源码（bridge.js、各功能模块、MCP server）
 ├─ scripts\             运维与测试脚本（test-*.mjs、patch-*.mjs、probe-*.mjs）
 ├─ dsh\                 DSH 侧资源：agent-presets\（QQ 会话预设）、consoles\
