@@ -9681,13 +9681,23 @@ async function main() {
     return distillerInstance;
   }
 
-  // 人设成长层（state/persona-growth.json）：人设卡是骨架，这里只存「慢慢长出来的软组织」，
-  // 上限 8 条 / 600 字，写入只能由管理员会话触发（见 /api/socialV2/persona-growth 的闸门）。
+  // 人设成长层（state/persona-growth.json）：人设卡是骨架，这里只存「慢慢长出来的软组织」。
+  // 上限来自 config.json 的 memory.personaGrowth（默认 12 条 / 600 字 / 待审 12 条 / 每条 80 字）；
+  // 写入策略见 /api/socialV2/persona-growth 的闸门（任何会话可提交，非管理员落待审）。
   function getPersonaGrowth() {
     if (personaGrowthInstance) return personaGrowthInstance;
+    const growConf = (cfg.memory && typeof cfg.memory.personaGrowth === 'object' && cfg.memory.personaGrowth) || {};
+    const num = (v, fallback) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+    };
     personaGrowthInstance = createPersonaGrowth({
       filePath: path.join(STATE_DIR, 'persona-growth.json'),
       historyPath: path.join(STATE_DIR, 'persona-growth-history.jsonl'),
+      maxEntries: num(growConf.maxEntries, 12),
+      maxTotalChars: num(growConf.maxTotalChars, 600),
+      maxPending: num(growConf.maxPending, 12),
+      maxTextLen: num(growConf.maxTextLen, 80),
       log,
       sanitize: (t) => redactSensitiveText(t),
       isSensitive: (t) => SENSITIVE_RE.test(String(t ?? '').replace(/[A-Za-z]:[\\/][^\s"'<>|]*/g, ''))

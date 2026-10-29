@@ -9,7 +9,8 @@
 //   3) 治疗式生长：任何聊天里 bot 都可以提交「我最近好像……」→ 落成 pending，
 //      管理员在控制台一键通过才生效，既让它自己长，又不会被人诱导着长歪。
 //
-// 硬约束：每条 ≤80 字；已生效 ≤8 条 / 总 600 字；待审 ≤12 条；敏感内容（令牌、凭证）拒写。
+// 硬约束（默认值，可用 config.json 的 memory.personaGrowth 覆盖）：每条 ≤80 字；
+// 已生效 ≤12 条 / 总 600 字；待审 ≤12 条；敏感内容（令牌、凭证）拒写。
 
 import fs from 'node:fs';
 
@@ -23,7 +24,7 @@ const KIND_LABEL = {
   rule: '相处'
 };
 
-const MAX_ENTRIES = 8;
+const MAX_ENTRIES = 12;
 const MAX_TOTAL_CHARS = 600;
 const MAX_PENDING = 12;
 const MAX_TEXT = 80;

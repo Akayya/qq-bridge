@@ -2358,7 +2358,7 @@ button:active:not(:disabled) {
       <div class="slang-scroll" id="profList" style="max-height:360px;overflow:auto;padding:6px">加载中…</div>
 
       <h3 style="margin-top:18px">人设成长</h3>
-      <div class="meta">人设卡 <code>roles/&lt;角色&gt;.md</code> 是骨架（底线改不了）；这里存它在聊天里慢慢长出来的部分，唤醒时会以【人设成长】注入。上限 8 条 / 600 字，每条 ≤80 字；写入只允许管理员会话（bot 调 <code>qq_persona_grow</code> 也一样受限），改动留审计在 <code>state/persona-growth-history.jsonl</code>。</div>
+      <div class="meta">人设卡 <code>roles/&lt;角色&gt;.md</code> 是骨架（底线改不了）；这里存它在聊天里慢慢长出来的部分，唤醒时会以【人设成长】注入。上限 12 条 / 600 字（可在 config.json 的 memory.personaGrowth 调），每条 ≤80 字；写入只允许管理员会话（bot 调 <code>qq_persona_grow</code> 也一样受限），改动留审计在 <code>state/persona-growth-history.jsonl</code>。</div>
       <div class="row" style="margin-top:8px">
         <span class="meta" id="growStats">—</span>
         <button class="small" id="growRefresh">刷新</button>
@@ -3982,7 +3982,7 @@ async function loadGrowth() {
     const pending = entries.filter((e) => e.status === 'pending');
     const used = approved.reduce((n, e) => n + String(e.text || '').length, 0);
     msg.textContent = '';
-    stats.textContent = `角色「${r.role || '未设'}」 · 已生效 ${approved.length}/${st.maxEntries || 8} 条 · ${used}/${st.maxTotalChars || 600} 字 · 待审 ${pending.length}/${st.maxPending || 12} 条`;
+    stats.textContent = `角色「${r.role || '未设'}」 · 已生效 ${approved.length}/${st.maxEntries || 12} 条 · ${used}/${st.maxTotalChars || 600} 字 · 待审 ${pending.length}/${st.maxPending || 12} 条`;
     if (!entries.length) { box.innerHTML = '<div class="meta" style="padding:8px">（还没有成长条目；bot 在聊天里提交的会先落到这里等你通过，你也可以直接加）</div>'; return; }
     const rows = (list, isPending) => list.map((e) => `
       <div class="row" style="align-items:flex-start;margin:6px 0;border-bottom:1px dashed rgba(0,0,0,.10);padding-bottom:6px">

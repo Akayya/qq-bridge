@@ -80,10 +80,10 @@ function unitTests() {
   ok(!rotten.ok && /敏感/.test(rotten.error), '敏感内容拒写', rotten.error);
 
   const beforeBroken = grow.list({ role: '小鲸鱼' }).length;
-  for (let i = 0; i < 8; i += 1) grow.add({ role: '小鲸鱼', text: `成长条目 ${i}` });
+  for (let i = 0; i < 12; i += 1) grow.add({ role: '小鲸鱼', text: `成长条目 ${i}` });
   const full = grow.add({ role: '小鲸鱼', text: '再来一条' });
-  ok(!full.ok && /已满 8 条/.test(full.error), '超过 8 条被拒', full.error);
-  ok(grow.list({ role: '小鲸鱼' }).length === 8, '上限内数量正确', `${beforeBroken} -> ${grow.list({ role: '小鲸鱼' }).length}`);
+  ok(!full.ok && /已满 12 条/.test(full.error), '超过 12 条被拒（默认上限已可配置）', full.error);
+  ok(grow.list({ role: '小鲸鱼' }).length === 12, '上限内数量正确', `${beforeBroken} -> ${grow.list({ role: '小鲸鱼' }).length}`);
 
   const longRole = createPersonaGrowth({ filePath: path.join(dir, 'g2.json'), maxTotalChars: 30, log: () => {} });
   longRole.add({ role: '小鲸鱼', text: '一'.repeat(20) });
@@ -92,14 +92,14 @@ function unitTests() {
 
   const target = grow.list({ role: '小鲸鱼' })[0];
   const rm = grow.remove({ role: '小鲸鱼', id: target.id });
-  ok(rm.ok && rm.removed === 1 && grow.list({ role: '小鲸鱼' }).length === 7, '按 id 删除');
+  ok(rm.ok && rm.removed === 1 && grow.list({ role: '小鲸鱼' }).length === 11, '按 id 删除');
 
   const cl = grow.clear({ role: '小鲸鱼' });
-  ok(cl.ok && cl.removed === 7 && grow.format('小鲸鱼') === '', '清空后人设成长不注入', JSON.stringify(cl));
+  ok(cl.ok && cl.removed === 11 && grow.format('小鲸鱼') === '', '清空后人设成长不注入', JSON.stringify(cl));
 
   ok(grow.format('不存在的角色') === '', '没条目时返回空串（不留空标题）');
   ok(grow.add({ role: '', text: 'x' }).ok === false, '角色名为空被拒');
-  ok(grow.stats().maxEntries === 8 && grow.stats().maxTotalChars === 600, 'stats() 暴露上限', JSON.stringify(grow.stats()));
+  ok(grow.stats().maxEntries === 12 && grow.stats().maxTotalChars === 600, 'stats() 暴露上限（默认 12 条/600 字）', JSON.stringify(grow.stats()));
 
   const hist = fs.readFileSync(historyPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   ok(hist.some((r) => r.op === 'add') && hist.some((r) => r.op === 'remove') && hist.some((r) => r.op === 'clear'), '审计文件记录了 add/remove/clear', `${hist.length} 行`);
@@ -140,6 +140,7 @@ async function httpTests() {
   const marker = `自检成长-${Date.now()}`;
   const list0 = await get('/api/socialV2/persona-growth?all=1');
   ok(list0.status === 200 && list0.data.ok && typeof list0.data.role === 'string', '管理页可读人设成长', JSON.stringify(list0.data).slice(0, 100));
+  ok(list0.data.stats?.maxEntries === 12 && list0.data.stats?.maxTotalChars === 600, '上限来自 config.json 的 memory.personaGrowth（12 条 / 600 字）', JSON.stringify(list0.data.stats));
 
   const add = await post('/api/socialV2/persona-growth', { op: 'add', text: marker, kind: 'quirk' });
   ok(add.status === 200 && add.data.ok && add.data.format.includes(marker), '控制台可加一条', JSON.stringify(add.data).slice(0, 140));

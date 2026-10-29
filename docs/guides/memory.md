@@ -38,7 +38,7 @@
 - **谁能写**：任何聊天都能 `add` 提交；但**只有管理员会话（`ownerQQ` 私聊）和控制台写的是 `approved`**，其余一律落成 `pending`——
   返回里 `pendingReview: true`，**不注入提示词**，要管理员在控制台（或管理员会话调 `op=approve`）通过才生效。
   `remove` / `clear` / `approve` 仍然只有管理员会话与控制台能调。
-- 硬约束：每条 ≤80 字；**已生效** ≤8 条、总 ≤600 字；**待审** ≤12 条；敏感内容（令牌/凭证）拒写；文件读坏就停写（不覆盖手写内容）。
+- 硬约束：每条 ≤80 字；**已生效** ≤12 条、总 ≤600 字（默认值，可在 `config.json` 的 `memory.personaGrowth` 调）；**待审** ≤12 条；敏感内容（令牌/凭证）拒写；文件读坏就停写（不覆盖手写内容）。
 - 审计：每次 add / approve / remove / clear 都追加一行 JSON 到 `state/persona-growth-history.jsonl`。
 - 注入顺序：`roleLine` → **人设成长（仅 approved）** → 身份/令牌 → … → 记忆/档案/共享记忆，以 `【人设成长】…` 出现；
   `qq_get_prompt` 的返回值里也有 `growth: { entries, text, limits }`。
@@ -65,7 +65,7 @@
 `qq_memory_remove`（`category=global` + `id`）、`qq_profile`、`qq_memory_distill`、`qq_persona_grow`。
 
 ## 控制台
-`public/console.html` 新增「记忆与档案」页：全库列表 + 搜索/按 kind·scope 筛选 + 手动添加 + 一键提炼（可预览/写回）+ 档案编辑 + 人设成长（列出/添加/删除，显示 `N/8 条 · X/600 字`）。
+`public/console.html` 新增「记忆与档案」页：全库列表 + 搜索/按 kind·scope 筛选 + 手动添加 + 一键提炼（可预览/写回）+ 档案编辑 + 人设成长（列出/添加/删除，显示 `N/12 条 · X/600 字 · 待审 K/12 条`）。
 
 ## 备份
 `scripts/backup-memory.mjs`（配合 `scripts/backup-memory.cmd` 给计划任务用）把上面的记忆导出成 JSON，
