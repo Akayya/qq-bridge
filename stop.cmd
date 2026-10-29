@@ -3,7 +3,8 @@ rem Stop the QQ bot: qq-bridge first, then SnowLuma.
 rem Flags: --bridge-only  --snowluma-only
 title qq-bridge stop
 setlocal
-set "NODE=C:\Users\Vonke\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
+set "NODE=%QQ_BRIDGE_NODE%"
+if not defined NODE set "NODE=%USERPROFILE%\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
 if not exist "%NODE%" (
   echo [stop] node not found: %NODE%
   pause
