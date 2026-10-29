@@ -5,6 +5,7 @@
 // 运行：node scripts/test-vision-media.mjs
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { safeFetchBuffer } from '../src/safe-fetch.js';
 
@@ -39,10 +40,18 @@ function check(name, cond, extra = '') {
 const MULTIMODAL_MODELS = ['deepseek-flash', 'deepseek-v4-flash-vision-exp'];
 const currentModelKey = `${config.dsh?.provider ?? ''}/${config.dsh?.model ?? ''}`;
 const visionUnsupported = Array.isArray(config.dsh?.visionUnsupported) ? config.dsh.visionUnsupported : [];
+const cordisPatch = (() => {
+  try {
+    return fs.readFileSync(path.join(os.homedir(), '.dsh', 'profiles', 'desktop', 'cordis.patch.yml'), 'utf8');
+  } catch {
+    return '';
+  }
+})();
+const cordisDeclaresImage = /input:\s*\[[^\]]*image[^\]]*\]/.test(cordisPatch);
 check(
   'config.dsh.model 支持看图，或已登记为不支持（走 OCR 降级）',
-  MULTIMODAL_MODELS.includes(config.dsh?.model) || visionUnsupported.includes(currentModelKey),
-  `当前 ${currentModelKey}（visionUnsupported=${JSON.stringify(visionUnsupported)}）`
+  MULTIMODAL_MODELS.includes(config.dsh?.model) || cordisDeclaresImage || visionUnsupported.includes(currentModelKey),
+  `当前 ${currentModelKey}（visionUnsupported=${JSON.stringify(visionUnsupported)}，cordis 声明 image=${cordisDeclaresImage}）`
 );
 check(
   'config.dsh.reasoningEffort 取值合法',

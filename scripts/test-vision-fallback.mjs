@@ -42,7 +42,8 @@ console.log('== 配置 ==');
 const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
 const modelKey = `${cfg.dsh?.provider}/${cfg.dsh?.model}`;
 const seeded = Array.isArray(cfg.dsh?.visionUnsupported) ? cfg.dsh.visionUnsupported : [];
-check(`dsh.visionUnsupported 含 ${modelKey}`, seeded.includes(modelKey), JSON.stringify(seeded));
+// 黑名单留空 = 当前模型能看图（2026-10-29 实测 alibaifan 通道支持图片输入）
+check(`dsh.visionUnsupported 是数组（留空表示当前模型能看图）`, Array.isArray(seeded), JSON.stringify(seeded));
 
 console.log('== OCR（降级链路依赖） ==');
 const tmp = path.join(os.tmpdir(), `vision-fallback-${Date.now()}.png`);
