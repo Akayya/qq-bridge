@@ -61,6 +61,7 @@ import { createMemeWiki } from './memewiki.js';
 import { createSharedMemory } from './shared-memory.js';
 import { createProfiles } from './profiles.js';
 import { createDistiller } from './memory-distill.js';
+import { createPersonaGrowth } from './persona-growth.js';
 import { createEmbedder } from './embeddings.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -75,6 +76,8 @@ const queryVecCache = new Map();
 // 人物与群档案（state/profiles.json）与记忆自动提炼器：同样懒初始化。
 let profilesInstance = null;
 let distillerInstance = null;
+// 人设成长层（state/persona-growth.json）：懒初始化。
+let personaGrowthInstance = null;
 // 记忆自动提炼的定时器句柄（main() 里设置）。
 const memoryDistill = { timer: null };
 const STATE_FILE = path.join(STATE_DIR, 'sessions.json');
@@ -4893,6 +4896,16 @@ async function main() {
               line: selfIdentityTextV2().trim() || null
             },
             role: { name: roleState.role ?? null, hint: currentMode === 'reserved2' ? currentRoleHintV2() : currentRoleHint() },
+            // 人设成长层：与角色卡一起返回，让模型把它当成「长出来的自己」而不是外部指令。
+            growth: (() => {
+              try {
+                const grow = getPersonaGrowth();
+                return { entries: grow.list({ role: roleState.role }), text: grow.format(roleState.role), limits: grow.stats() };
+              } catch (error) {
+                log(`人设成长：qq_get_prompt 读取失败（${error?.message ?? error}）`);
+                return { entries: [], text: '', limits: null };
+              }
+            })(),
             recommended: cfg.socialV2?.provideRecommendations === false ? null : {
               wake: cfg.socialV2?.wake ?? {},
               send: cfg.socialV2?.send ?? {},
@@ -6921,6 +6934,74 @@ async function main() {
           if (!r.ok) { sendJson({ ok: false, error: r.error }, 400); return; }
           log(`共享记忆：${key || '（控制台）'} 删除 ${r.removed} 条`);
           sendJson({ ok: true, key, removed: r.removed });
+          return;
+        }
+        // ── 人设成长层（state/persona-growth.json）──────────────────────────
+        // 人设卡是骨架（管理端写），这里只存「聊天里慢慢长出来的软组织」：
+        // 新口头禅、新习惯、和某人的关系变化。写入只允许管理员（ownerQQ）会话触发。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/persona-growth') {
+          const grow = getPersonaGrowth();
+          const role = readRoleState().role;
+          // 管理页：不分会话看当前角色全部条目（智能体不许走这条，免得被诱导整库导出）。
+          if (url.searchParams.get('all') === '1') {
+            if (req.headers['x-agent-call'] !== undefined) { sendJson({ ok: false, error: '管理端接口不接受智能体调用' }, 403); return; }
+            sendJson({ ok: true, role, entries: grow.list({ role }), format: grow.format(role), stats: grow.stats() });
+            return;
+          }
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          if (key) {
+            if (req.headers['x-agent-token'] && !agentTokenOkAny(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: agentTokenErrText(key, req.headers['x-agent-token']) }, 403); return; }
+            if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+            if (req.headers['x-agent-token'] && !v2ToolEnabled('personaGrow')) { sendJson({ ok: false, error: '工具未启用：qq_persona_grow' }, 403); return; }
+          }
+          sendJson({ ok: true, key: key || null, role, entries: grow.list({ role }), format: grow.format(role), stats: grow.stats() });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/persona-growth') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const op = String(body.op ?? 'add').trim();
+          const isAgentCall = req.headers['x-agent-call'] !== undefined;
+          const token = req.headers['x-agent-token'];
+          if (key) {
+            if (token && !agentTokenOkAny(key, token)) { sendJson({ ok: false, error: agentTokenErrText(key, token) }, 403); return; }
+            if (token && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+            if (token && !v2ToolEnabled('personaGrow')) { sendJson({ ok: false, error: '工具未启用：qq_persona_grow' }, 403); return; }
+          } else if (isAgentCall) {
+            sendJson({ ok: false, error: 'key 不能为空' }, 400);
+            return;
+          }
+          // 写闸门：智能体必须是管理员会话；管理端（控制台令牌）可直接改。
+          if (isAgentCall && !(token && agentTokenIsOwner(token))) {
+            sendJson({ ok: false, error: '只有管理员（ownerQQ）的私聊能改人设成长，别的聊天一律拒绝' }, 403);
+            return;
+          }
+          const role = readRoleState().role;
+          const grow = getPersonaGrowth();
+          if (op === 'add') {
+            const r = grow.add({ role, text: body.text, kind: body.kind, sourceKey: key });
+            if (!r.ok) {
+              const privacy = /敏感信息/.test(r.error);
+              sendJson({ ok: false, error: r.error }, privacy ? 403 : 400);
+              return;
+            }
+            log(`人设成长：${key || '（控制台）'} +1「${String(body.text ?? '').slice(0, 30)}」`);
+            sendJson({ ok: true, role, id: r.id, duplicate: !!r.duplicate, entries: grow.list({ role }), format: grow.format(role), stats: grow.stats() });
+            return;
+          }
+          if (op === 'remove') {
+            const r = grow.remove({ role, id: body.id, text: body.text });
+            if (!r.ok) { sendJson({ ok: false, error: r.error }, 400); return; }
+            sendJson({ ok: true, role, removed: r.removed, entries: grow.list({ role }), format: grow.format(role), stats: grow.stats() });
+            return;
+          }
+          if (op === 'clear') {
+            const r = grow.clear({ role });
+            if (!r.ok) { sendJson({ ok: false, error: r.error }, 400); return; }
+            sendJson({ ok: true, role, removed: r.removed, entries: [], format: '', stats: grow.stats() });
+            return;
+          }
+          sendJson({ ok: false, error: `未知 op：${op}` }, 400);
           return;
         }
         // ── 人物 / 群档案（state/profiles.json）────────────────────────────────
@@ -9573,6 +9654,20 @@ async function main() {
     return distillerInstance;
   }
 
+  // 人设成长层（state/persona-growth.json）：人设卡是骨架，这里只存「慢慢长出来的软组织」，
+  // 上限 8 条 / 600 字，写入只能由管理员会话触发（见 /api/socialV2/persona-growth 的闸门）。
+  function getPersonaGrowth() {
+    if (personaGrowthInstance) return personaGrowthInstance;
+    personaGrowthInstance = createPersonaGrowth({
+      filePath: path.join(STATE_DIR, 'persona-growth.json'),
+      historyPath: path.join(STATE_DIR, 'persona-growth-history.jsonl'),
+      log,
+      sanitize: (t) => redactSensitiveText(t),
+      isSensitive: (t) => SENSITIVE_RE.test(String(t ?? '').replace(/[A-Za-z]:[\\/][^\s"'<>|]*/g, ''))
+    });
+    return personaGrowthInstance;
+  }
+
   function formatMemoryV2(st) {
     if (!st) return '';
     const lines = [];
@@ -11144,6 +11239,16 @@ async function main() {
   function buildWakePromptV2(key, reason, out) {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
+    // 人设成长层紧跟在角色名之后：它属于角色本身，比记忆/档案更「像你自己」。
+    const growthText = (() => {
+      try {
+        return getPersonaGrowth().format(roleState.role);
+      } catch (error) {
+        log(`人设成长：注入失败（${error?.message ?? error}）`);
+        return '';
+      }
+    })();
+    const growthLine = growthText ? `${growthText}\n\n` : '';
     const identityLine = selfIdentityTextV2();
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
@@ -11241,7 +11346,7 @@ async function main() {
     const crossChatLine = key === (cfg.ownerQQ ? `private:${Number(cfg.ownerQQ)}` : '')
       ? '【跨聊天操作】你是管理员会话：管理员让你去别的聊天（某群 / 某人私聊）读消息、发消息、撤回、点赞、识别图片时，直接把目标会话 key（group:群号 或 private:QQ号）传给对应工具、令牌仍用上面的【会话令牌】即可；桥接只放行白名单内的聊天，被拒绝就如实说「那个聊天不在白名单」。没有管理员指令时不要主动跑去别的聊天发言。\n\n'
       : '';
-    const base = roleLine + identityLine + tokenLine + crossChatLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + profilesLine + sharedMemoryLine + relatedMemoryLine + participationLine + preSleepLine + timeSenseLine;
+    const base = roleLine + growthLine + identityLine + tokenLine + crossChatLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + profilesLine + sharedMemoryLine + relatedMemoryLine + participationLine + preSleepLine + timeSenseLine;
     // 唤醒原因里的那条消息本身多旧：`atMention@seq194` 这种形态能反查到原消息。
     const triggeredSeq = wakeReasonSeq(reason);
     const triggeredMsg = triggeredSeq ? findV2MessageBySeq(st, triggeredSeq) : null;

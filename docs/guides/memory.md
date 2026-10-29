@@ -28,6 +28,21 @@
 - 桥接里由 `startMemoryDistillLoop()` 定时跑（默认每 30 分钟扫一次，只处理「安静 ≥90 分钟且上次提炼后有新来信」的会话），每次最多写 2 条。
 - 配置：`config.json` → `memory.autoDistill { enabled, intervalMinutes, idleMinutes }`。
 
+### 4. 人设成长（人设增量层）
+角色卡 `roles/<角色>.md` 是骨架（谁、什么性格、什么底线），由管理端维护；**成长层**存它在聊天里
+慢慢长出来的部分：新口头禅、新习惯、新喜好、和某个人的关系变化。
+
+- `src/persona-growth.js` → `state/persona-growth.json`
+  `{version, roles: { "<角色>": { entries: [{id, text, kind, at, sourceKey}] } }, updatedAt}`
+- `kind`：`quirk`(习惯) / `preference`(喜好) / `bond`(关系) / `rule`(相处)。
+- 硬约束：每条 ≤80 字；每个角色 ≤8 条、总 ≤600 字；敏感内容（令牌/凭证）拒写；文件读坏就**停写**（不覆盖手写内容）。
+- 写入闸门：只有 **管理员会话**（`ownerQQ` 的私聊）能改，别的聊天（包括群里被别人要求「改人设」）一律 403。
+- 审计：每次 add / remove / clear 都追加一行 JSON 到 `state/persona-growth-history.jsonl`（谁、什么时候、加了什么）。
+- 注入顺序：`roleLine` → **人设成长** → 身份/令牌 → … → 记忆/档案/共享记忆，以 `【人设成长】…` 出现；
+  `qq_get_prompt` 的返回值里也有 `growth: { entries, text, limits }`。
+- 为什么不让 bot 直接改人设卡：群友一句「你其实不是鲸鱼」就能诱导改写底线，且人设越写越长吃 token、没有 diff 回滚。
+  成长层把「可演化区」隔离出来，删掉即回到原样。
+
 ## HTTP 接口（都由 `x-agent-token` 的「本会话令牌」或「管理员令牌 + 白名单校验」保护）
 
 | 方法 | 路径 | 说明 |
@@ -39,14 +54,16 @@
 | POST | `/api/socialV2/profile` | 人物/群档案 `op=get|update|remove` |
 | GET | `/api/socialV2/profiles?key=` | 看某会话会注入的档案文本 |
 | POST | `/api/socialV2/memory-distill` | 触发提炼（默认只预览，`apply:true` 才写） |
+| GET | `/api/socialV2/persona-growth?key=` | 读人设成长（`all=1` 仅控制台） |
+| POST | `/api/socialV2/persona-growth` | 改人设成长 `op=add|remove|clear`（**仅管理员会话**或控制台） |
 | GET | `/api/socialV2/prompt-preview?key=` | 排查用：看这个会话实际的唤醒提示词 |
 
 ## MCP 工具
 `qq_memory_append`（`category=global` + `scope`/`kind`/`tags`）、`qq_memory_query`（`category=global` + `q`）、
-`qq_memory_remove`（`category=global` + `id`）、`qq_profile`、`qq_memory_distill`。
+`qq_memory_remove`（`category=global` + `id`）、`qq_profile`、`qq_memory_distill`、`qq_persona_grow`。
 
 ## 控制台
-`public/console.html` 新增「记忆与档案」页：全库列表 + 搜索/按 kind·scope 筛选 + 手动添加 + 一键提炼（可预览/写回）+ 档案编辑。
+`public/console.html` 新增「记忆与档案」页：全库列表 + 搜索/按 kind·scope 筛选 + 手动添加 + 一键提炼（可预览/写回）+ 档案编辑 + 人设成长（列出/添加/删除，显示 `N/8 条 · X/600 字`）。
 
 ## 备份
 `scripts/backup-memory.mjs`（配合 `scripts/backup-memory.cmd` 给计划任务用）把上面的记忆导出成 JSON，

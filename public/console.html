@@ -2357,6 +2357,25 @@ button:active:not(:disabled) {
       <div class="row"><button class="small" id="profRefresh">刷新档案</button><span class="meta" id="profMsg"></span></div>
       <div class="slang-scroll" id="profList" style="max-height:360px;overflow:auto;padding:6px">加载中…</div>
 
+      <h3 style="margin-top:18px">人设成长</h3>
+      <div class="meta">人设卡 <code>roles/&lt;角色&gt;.md</code> 是骨架（底线改不了）；这里存它在聊天里慢慢长出来的部分，唤醒时会以【人设成长】注入。上限 8 条 / 600 字，每条 ≤80 字；写入只允许管理员会话（bot 调 <code>qq_persona_grow</code> 也一样受限），改动留审计在 <code>state/persona-growth-history.jsonl</code>。</div>
+      <div class="row" style="margin-top:8px">
+        <span class="meta" id="growStats">—</span>
+        <button class="small" id="growRefresh">刷新</button>
+        <span class="meta" id="growMsg"></span>
+      </div>
+      <div class="slang-scroll" id="growList" style="max-height:280px;overflow:auto;padding:6px">加载中…</div>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="growText" placeholder="加一条，例如：最近老爱说“绷”" style="flex:1">
+        <select id="growKind" style="width:110px">
+          <option value="quirk">习惯</option>
+          <option value="preference">喜好</option>
+          <option value="bond">关系</option>
+          <option value="rule">相处</option>
+        </select>
+        <button class="small" id="growAdd">添加</button>
+      </div>
+
       <h3 style="margin-top:18px">新增 / 更新档案</h3>
       <div class="row">
         <select id="profTarget" style="width:110px"><option value="person">人物</option><option value="group">群</option></select>
@@ -3754,7 +3773,7 @@ function memFmtTime(ts) {
   return new Date(n).toLocaleString();
 }
 async function loadMemoryPage() {
-  await Promise.all([loadMemoryEntries(), loadProfiles()]);
+  await Promise.all([loadMemoryEntries(), loadProfiles(), typeof loadGrowth === 'function' ? loadGrowth() : Promise.resolve()]);
 }
 async function loadMemoryEntries() {
   const msg = document.getElementById('memMsg');
@@ -3944,6 +3963,70 @@ document.getElementById('profList').addEventListener('click', async (ev) => {
   msg.className = r.ok ? 'meta ok' : 'meta err';
   if (r.ok) loadProfiles();
 });
+
+// ── 人设成长（state/persona-growth.json）───────────────────────────────────
+const GROW_KIND_LABEL = { quirk: '习惯', preference: '喜好', bond: '关系', rule: '相处' };
+async function loadGrowth() {
+  const msg = document.getElementById('growMsg');
+  const box = document.getElementById('growList');
+  const stats = document.getElementById('growStats');
+  if (!box) return;
+  msg.textContent = '加载中…';
+  msg.className = 'meta';
+  try {
+    const r = await api('/api/socialV2/persona-growth?all=1');
+    if (!r.ok) { msg.textContent = '❌ ' + (r.error || '加载失败'); msg.className = 'meta err'; return; }
+    const entries = Array.isArray(r.entries) ? r.entries : [];
+    const st = r.stats || {};
+    const used = entries.reduce((n, e) => n + String(e.text || '').length, 0);
+    msg.textContent = '';
+    stats.textContent = `角色「${r.role || '未设'}」 · ${entries.length}/${st.maxEntries || 8} 条 · ${used}/${st.maxTotalChars || 600} 字`;
+    if (!entries.length) { box.innerHTML = '<div class="meta" style="padding:8px">（还没有成长条目；管理员在私聊里说「记住……」bot 就会加，或在这里手动加）</div>'; return; }
+    box.innerHTML = entries.map((e) => `
+      <div class="row" style="align-items:flex-start;margin:6px 0;border-bottom:1px dashed rgba(0,0,0,.10);padding-bottom:6px">
+        <span class="pill">${esc(GROW_KIND_LABEL[e.kind] || '习惯')}</span>
+        <div style="flex:1;min-width:200px">
+          <div>${esc(e.text)}</div>
+          <div class="meta">${esc(String(e.at || '').replace('T', ' ').slice(0, 16))}${e.sourceKey ? ' · 来自 ' + esc(e.sourceKey) : ''}</div>
+        </div>
+        <button class="small danger" data-grow-remove="${esc(e.id)}">删除</button>
+      </div>`).join('');
+  } catch (e) {
+    msg.textContent = '❌ ' + (e.message || e);
+    msg.className = 'meta err';
+  }
+}
+async function addGrowth() {
+  const msg = document.getElementById('growMsg');
+  const input = document.getElementById('growText');
+  const text = input.value.trim();
+  const kind = document.getElementById('growKind').value;
+  if (!text) { msg.textContent = '先填内容'; msg.className = 'meta err'; return; }
+  try {
+    const r = await api('/api/socialV2/persona-growth', 'POST', { op: 'add', text, kind });
+    msg.textContent = r.ok ? (r.duplicate ? '已经记过了' : '✅ 已加入人设成长') : ('❌ ' + (r.error || '添加失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    if (r.ok) { input.value = ''; loadGrowth(); }
+  } catch (e) {
+    msg.textContent = '❌ ' + (e.message || e);
+    msg.className = 'meta err';
+  }
+}
+if (document.getElementById('growRefresh')) {
+  document.getElementById('growRefresh').addEventListener('click', () => loadGrowth());
+  document.getElementById('growAdd').addEventListener('click', addGrowth);
+  document.getElementById('growText').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') addGrowth(); });
+  document.getElementById('growList').addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('button[data-grow-remove]');
+    if (!btn) return;
+    if (!confirm('删掉这条人设成长？')) return;
+    const r = await api('/api/socialV2/persona-growth', 'POST', { op: 'remove', id: btn.dataset.growRemove });
+    const msg = document.getElementById('growMsg');
+    msg.textContent = r.ok ? '✅ 已删除' : ('❌ ' + (r.error || '删除失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    if (r.ok) loadGrowth();
+  });
+}
 
 function formatWakeStatus(r) {
   if (!r || !r.ok) return '<span class="meta">加载失败</span>';

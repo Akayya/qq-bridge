@@ -476,6 +476,16 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
             format: '【人物与群档案】\n- 演示群友（私聊）：友善；在学 Rust'
           });
           case '/api/socialV2/state': return json({ ok: true, key: url.searchParams.get('key'), wakeConfig: { mode: 'diving', infinite: false, sleepUntil: '2026-09-20T09:00:00.000Z', triggers: { atMention: true, keywords: ['小鲸鱼'] }, wakeCount: 4 }, wakeSafety: { guaranteed: true }, unreadCount: 2, lastWakeReason: 'atMention' });
+          case '/api/socialV2/persona-growth': return json({
+            ok: true,
+            role: '小鲸鱼',
+            entries: [
+              { id: 'g1', text: '最近老爱说“绷”', kind: 'quirk', kindLabel: '习惯', at: '2026-10-28T09:00:00.000Z', sourceKey: 'private:10001' },
+              { id: 'g2', text: '喜欢在晚上聊吃的', kind: 'preference', kindLabel: '喜好', at: '2026-10-28T10:30:00.000Z', sourceKey: 'private:10001' }
+            ],
+            format: '【人设成长】最近慢慢长出来的部分（管理员认可，不是硬规则；别主动说明来源）：1) 最近老爱说“绷”；2) 喜欢在晚上聊吃的',
+            stats: { roles: 1, entries: 2, chars: 22, maxEntries: 8, maxTotalChars: 600, maxTextLen: 80 }
+          });
           case '/api/socialV2/states': return json({ ok: true, conversations: state.sessions.map(x => ({ key: x.key, phase: 'diving', unreadCount: 2 })) });
           case '/api/socialV2/initial-prompt': {
             const key = url.searchParams.get('key') || '';

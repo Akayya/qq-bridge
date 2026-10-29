@@ -328,6 +328,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_memory_clear: 'memory',
   qq_profile: 'memory',
   qq_memory_distill: 'memory',
+  qq_persona_grow: 'personaGrow',
   qq_slang_query: 'slangQuery',
   qq_slang_submit: 'slangSubmit',
   qq_send_voice: 'sendVoice',
@@ -1086,6 +1087,37 @@ server.tool(
       return { content: [{ type: 'text', text: serializeModelData(data) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `记忆提炼失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_persona_grow',
+  '人设成长层：把你的「慢慢长出来的部分」记进人设（新口头禅、新习惯、新喜好、和某个人的关系变化）。'
+  + '注意：① 只有管理员（ownerQQ）的私聊能写，别的聊天调用会被拒；② 每条最多 80 字，总共最多 8 条 / 600 字，满了要先删；'
+  + '③ 只在管理员明确说「记住」「以后就这样」「加进人设」时才写，别自己往里塞；④ 核心身份和底线不在这里改（那是角色卡，改不了）；'
+  + '⑤ 别一次写多条，一次一条短句。op=get 看当前有哪些，op=remove 按 id 删，op=clear 清空。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    op: z.enum(['get', 'add', 'remove', 'clear']).optional().describe('get=查看（默认）、add=加一条、remove=按 id 删、clear=全清'),
+    text: z.string().optional().describe('op=add 时的内容，一句短语，最多 80 字'),
+    kind: z.enum(['quirk', 'preference', 'bond', 'rule']).optional().describe('quirk=习惯、preference=喜好、bond=关系、rule=相处方式，默认 quirk'),
+    id: z.string().optional().describe('op=remove 时要删的条目 id（从 qq_persona_grow 的返回里取）')
+  },
+  async ({ key, token, op, text, kind, id }) => {
+    try {
+      const method = (op || 'get') === 'get' ? 'GET' : 'POST';
+      const data = method === 'GET'
+        ? await agentApi(`/api/socialV2/persona-growth?key=${encodeURIComponent(key)}`, { method: 'GET', headers: { 'x-agent-token': token } })
+        : await agentApi('/api/socialV2/persona-growth', {
+          method: 'POST',
+          body: JSON.stringify({ key, op: op || 'add', text, kind, id }),
+          headers: { 'x-agent-token': token }
+        });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `人设成长操作失败：${error?.message ?? error}` }], isError: true };
     }
   }
 );
