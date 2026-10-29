@@ -61,12 +61,17 @@ import { createMemeWiki } from './memewiki.js';
 import { createSharedMemory } from './shared-memory.js';
 import { createProfiles } from './profiles.js';
 import { createDistiller } from './memory-distill.js';
+import { createEmbedder } from './embeddings.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const STATE_DIR = path.join(ROOT, 'state');
 // 跨聊天共享记忆（SQLite）：模块级单例，首次用到时在 getSharedMemory() 里懒初始化。
 let sharedMemoryInstance = null;
+// 本地向量嵌入（语义召回）：懒初始化，模型只加载一次；失败即整层关闭，退回关键词检索。
+let embedderInstance = null;
+// 每个会话「最近来信」的向量缓存（内存态，不落盘）：key -> { vec, text, at }
+const queryVecCache = new Map();
 // 人物与群档案（state/profiles.json）与记忆自动提炼器：同样懒初始化。
 let profilesInstance = null;
 let distillerInstance = null;
@@ -4930,12 +4935,35 @@ async function main() {
           const key = String(url.searchParams.get('key') ?? '').trim();
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
           const reason = String(url.searchParams.get('reason') ?? 'preview');
+          // ?text=… 只给排查用：先把这段文字算成查询向量，好观察【相关记忆】的效果（不落库）
+          const probeText = String(url.searchParams.get('text') ?? '').trim().slice(0, 200);
           let prompt = '';
-          try { prompt = buildWakePromptV2(key, reason); } catch (error) {
+          const previewOut = {};
+          try {
+            if (probeText) {
+              const probeVecs = await getEmbedder().embed([probeText]);
+              if (probeVecs?.[0]) {
+                queryVecCache.set(canonicalV2Key(key) ?? key, { vec: probeVecs[0], text: probeText, at: Date.now() });
+              }
+            }
+            prompt = buildWakePromptV2(key, reason, previewOut);
+          } catch (error) {
             sendJson({ ok: false, error: `生成提示词失败：${error?.message ?? error}` }, 500);
             return;
           }
-          sendJson({ ok: true, key, reason, chars: prompt.length, prompt });
+          const shared = previewOut.shared || {};
+          sendJson({
+            ok: true,
+            key,
+            reason,
+            chars: prompt.length,
+            prompt,
+            memory: {
+              injected: shared.injectedIds || [],
+              related: shared.relatedIds || [],
+              semantic: shared.semanticIds || []
+            }
+          });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/unread') {
@@ -9469,7 +9497,56 @@ async function main() {
       // 先把盘符路径摘掉再测 SENSITIVE_RE，剩下的命中就是 token=xxx / /home/… 这类。
       isSensitive: (t) => SENSITIVE_RE.test(String(t ?? '').replace(/[A-Za-z]:[\\/][^\s"'<>|]*/g, ''))
     });
+    try {
+      sharedMemoryInstance.setEmbedder(getEmbedder());
+      // 预热模型 + 给历史条目补算向量都放后台，绝不拖慢第一条回复
+      void sharedMemoryInstance.ensureVectors();
+    } catch (error) {
+      log(`⚠️ 共享记忆向量层初始化失败（本轮回退关键词检索）：${error?.message ?? error}`);
+    }
     return sharedMemoryInstance;
+  }
+
+  // 本地向量模型（src/embeddings.mjs）：bge-small-zh-v1.5 / q8，首次用 hf-mirror 下载约 24 MB，
+  // 之后完全离线。配置在 config.json 的 memory.embeddings；加载失败不会影响聊天与记忆写入。
+  function getEmbedder() {
+    if (embedderInstance) return embedderInstance;
+    const conf = cfg.memory?.embeddings || {};
+    embedderInstance = createEmbedder({
+      enabled: conf.enabled !== false,
+      model: String(conf.model || 'Xenova/bge-small-zh-v1.5'),
+      dtype: String(conf.dtype || 'q8'),
+      cacheDir: conf.cacheDir ? path.resolve(ROOT, String(conf.cacheDir)) : path.join(STATE_DIR, 'models'),
+      remoteHost: String(conf.remoteHost || 'https://hf-mirror.com'),
+      log
+    });
+    if (conf.enabled !== false && conf.warmOnStart !== false) void embedderInstance.warm();
+    return embedderInstance;
+  }
+
+  // 把「最近几条来信」编码成向量，供唤醒时做语义召回。
+  // 放在消息落库之后异步跑：既不阻塞回复，也避免在同步的 buildWakePromptV2 里 await。
+  async function primeQueryEmbedding(key) {
+    const emb = getEmbedder();
+    if (!emb.info().enabled) return;
+    const cKey = canonicalV2Key(key) ?? key;
+    const st = getSocialV2State(key);
+    const recent = (Array.isArray(st.recentMessages) ? st.recentMessages : [])
+      .filter((m) => m && !m.isSelf)
+      .slice(-3)
+      .map((m) => String(m.text || m.plain || m.tail || ''))
+      .join(' ')
+      .slice(0, 200);
+    if ([...recent].length < 4) return;
+    const cached = queryVecCache.get(cKey);
+    if (cached && cached.text === recent && Date.now() - cached.at < 10 * 60 * 1000) return;
+    const vecs = await emb.embed([recent]);
+    if (!vecs?.[0]) return;
+    queryVecCache.set(cKey, { vec: vecs[0], text: recent, at: Date.now() });
+    if (queryVecCache.size > 200) {
+      const oldest = [...queryVecCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+      if (oldest) queryVecCache.delete(oldest[0]);
+    }
   }
 
   // 人物与群档案（state/profiles.json）：私聊注入对方档案、群里注入群概况 + 最近说话的人。
@@ -10637,6 +10714,8 @@ async function main() {
       if (topicHit || participantHit) t.lastMentionAt = Date.now();
     }
     saveSocialV2State();
+    // 有新来信就顺手把「最近几句」编码成向量，唤醒时用它做语义召回（失败静默降级）
+    void primeQueryEmbedding(key).catch(() => {});
   }
 
   // 二代拍一拍事件写入最近/未读消息流，让 AI 能看到“谁拍了拍谁/拍了拍我”。
@@ -11062,7 +11141,7 @@ async function main() {
     return `【你的身份】你在 QQ 上的昵称是${label}${idText}。${callBits}；群名片可能与昵称不同，at/引用段里带${id ? ` ${id} ` : '你的 QQ 号'}就是在叫你。\n\n`;
   }
 
-  function buildWakePromptV2(key, reason) {
+  function buildWakePromptV2(key, reason, out) {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
     const identityLine = selfIdentityTextV2();
@@ -11079,12 +11158,23 @@ async function main() {
       .slice(0, 400);
     const sharedBundle = (() => {
       try {
-        return getSharedMemory().injectBundle(key, { recentText: recentIncoming });
+        // 语义召回：来信向量由 appendSocialV2Message 异步算好放在 queryVecCache，
+        // 30 分钟内有效；没有（模型没装好/刚重启）就只走关键词与字重合。
+        const cachedVec = queryVecCache.get(canonicalV2Key(key) ?? key);
+        const queryVec = cachedVec && Date.now() - cachedVec.at < 30 * 60 * 1000 ? cachedVec.vec : null;
+        const embConf = cfg.memory?.embeddings || {};
+        return getSharedMemory().injectBundle(key, {
+          recentText: recentIncoming,
+          queryVec,
+          minScore: Number(embConf.minScore) || undefined,
+          semanticLimit: Number(embConf.semanticTopK) || undefined
+        });
       } catch (error) {
         log(`⚠️ 共享记忆注入失败：${error?.message ?? error}`);
         return { text: '', relatedText: '' };
       }
     })();
+    if (out) out.shared = sharedBundle;
     const sharedMemoryLine = sharedBundle.text ? `${sharedBundle.text}\n\n` : '';
     const relatedMemoryLine = sharedBundle.relatedText ? `${sharedBundle.relatedText}\n\n` : '';
     // 人物与群档案：私聊注入对方档案；群里注入群概况 + 最近说话的 3 个人的档案。

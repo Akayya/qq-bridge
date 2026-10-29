@@ -61,6 +61,42 @@ node scripts/backup-memory.mjs --keep-days 0 # 不清理历史快照（默认保
 
 > 清理只删「每日历史快照文件」，`latest.json` 永远是最新全量；记忆本身在 `state/memory.db` 里不受影响。
 
+## 语义召回（向量）
+
+字面匹配（FTS5 trigram + 字重合）搞不定「同义不同词」：说「今天点了杯冰咖啡」，记的是「只喝冰美式」。
+所以额外接了一个**本地小模型**做语义召回，全离线、不上传任何内容。
+
+- 模型：`Xenova/bge-small-zh-v1.5`（q8 量化，**512 维**，磁盘 ~24 MB，单条推理 ~2 ms）
+- 依赖：`vendor/embeddings/node_modules/@huggingface/transformers` + `onnxruntime-node`（独立目录，不污染主 `node_modules`）
+- 模型缓存：`state/models/`（首次运行从 `hf-mirror.com` 下载；之后完全离线）
+- 写入：每条记忆落库后异步补算向量（250ms 合批，不阻塞回复）；历史条目在启动时回填
+- 读取：取你最近 3 条来信拼成查询，算出向量，和库存条目算余弦；≥ `minScore`（默认 **0.5**）的进【相关记忆】
+- 降级：模型加载失败 / 目录被删 → 只打一条日志，语义召回自动关闭，其它功能照常
+
+配置在 `config.json`：
+
+```json
+"memory": {
+  "embeddings": {
+    "enabled": true,
+    "provider": "local",
+    "model": "Xenova/bge-small-zh-v1.5",
+    "dtype": "q8",
+    "cacheDir": "state/models",
+    "remoteHost": "https://hf-mirror.com",
+    "warmOnStart": true,
+    "semanticTopK": 3,
+    "minScore": 0.5
+  }
+}
+```
+
+调阈值：**想更灵敏就调低**（0.4 会把「咖啡/茶」这类弱相关也拉进来），**想更保守就调高**（0.6 只留强相关）。
+实测参考分数：「今天点了杯冰咖啡」↔「只喝冰美式」= 0.63，↔「猫叫年糕」= 0.31。
+
+> 国内网络必须走 `hf-mirror.com`（`huggingface.co` 直连会超时）。已下载就不需要网络了。
+> 换模型时改 `model` 并删 `state/models` 里的旧目录即可；换 **维度不同** 的模型要同时清空 `memories.embedding` 列（`UPDATE memories SET embedding=NULL`），否则余弦长度不等会被跳过。
+
 ## 测试
 ```bash
 node scripts/test-shared-memory.mjs      # 共享记忆：单测 + HTTP 端到端

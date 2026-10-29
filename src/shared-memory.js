@@ -18,9 +18,14 @@
 //     中文用 trigram：≥3 个字才走 FTS，1~2 个字回退 LIKE '%q%'。
 //   · 唤醒时还会用「最近几条来信」跟库里的条目比「内容字重合度」，命中就额外注入【相关记忆】，
 //     这样「猫叫什么来着」能翻出半年前的「养了只猫叫年糕」。
+//   · 语义召回（可选，见 src/embeddings.mjs）：接上本地向量模型后，条目写入时异步补算向量，
+//     唤醒时再拿来信向量做余弦相似度召回 —— 解决「字面对不上但意思相同」的情况
+//     （「电脑」vs「计算机」、「冰美式」vs「冰咖啡」）。模型没装好时这一层自动关闭，
+//     上面的 FTS + 字重合照常工作。
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { cosine } from './embeddings.mjs';
 
 export const MEMORY_KINDS = ['fact', 'preference', 'bond', 'rule'];
 const KIND_LABEL = { fact: '事实', preference: '偏好', bond: '关系', rule: '规则' };
@@ -81,6 +86,32 @@ export function createSharedMemory({
 
   const ownerKey = ownerQQ ? `private:${Number(ownerQQ)}` : '';
 
+  // ── 向量检索（可选层）────────────────────────────────────────────
+  let embedder = null;                 // { embed(texts), available(), info() }
+  let vecCache = null;                 // Map<id, Float32Array>，按需从库里懒加载
+  const embedQueue = [];               // 待补算向量的条目 id/text
+  let embedTimer = null;
+  let embedBusy = false;
+  let embedFailedLogged = false;
+  const EMBED_BATCH = 8;
+  const SEMANTIC_MIN_SCORE = 0.5;      // bge-small-zh q8 实测：相关句 0.46~0.62，无关 0.23~0.48
+
+  /** 老库升级：补 embedding / embed_model / embed_dim 三列（幂等） */
+  function ensureEmbeddingColumns(conn) {
+    let cols = [];
+    try {
+      cols = conn.prepare('PRAGMA table_info(memories)').all().map((c) => c.name);
+    } catch {
+      return;
+    }
+    const add = (name, type) => {
+      if (!cols.includes(name)) conn.exec(`ALTER TABLE memories ADD COLUMN ${name} ${type}`);
+    };
+    add('embedding', 'BLOB');
+    add('embed_model', 'TEXT');
+    add('embed_dim', 'INTEGER');
+  }
+
   function open() {
     if (db) return db;
     if (broken) return null;
@@ -106,6 +137,7 @@ export function createSharedMemory({
         CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);
         CREATE INDEX IF NOT EXISTS idx_memories_used ON memories(used_at DESC);
       `);
+      ensureEmbeddingColumns(conn);
       // FTS5 外部内容表：索引直接引用 memories 的行，靠触发器同步。
       // 用 trigram 分词（SQLite ≥3.34），中文不需要先切词；查询 <3 字时调用方回退 LIKE。
       const hadFts = Number(conn.prepare(
@@ -227,6 +259,8 @@ export function createSharedMemory({
       stmt.run(k, body, tagList.join(','), finalScope, key, now, now);
       const row = conn.prepare('SELECT id, hits FROM memories WHERE text = ? AND scope = ?').get(body, finalScope);
       prune(conn);
+      // 向量不阻塞写入：先落库，250ms 后后台补算（失败只是语义召回暂时不好用）
+      queueEmbed(Number(row?.id ?? 0), body);
       return { ok: true, id: Number(row?.id ?? 0), scope: finalScope, downgradedFrom, kind: k, text: body };
     } catch (error) {
       return { ok: false, error: `写入失败：${error?.message ?? error}` };
@@ -349,6 +383,159 @@ export function createSharedMemory({
     hits: Number(r.hits)
   });
 
+  // ── 向量层：写入补算 / 历史回填 / 语义召回 ────────────────────────
+
+  /** 挂上嵌入器。bridge 启动时调用一次；不挂或挂上但加载失败，语义层自动关闭。 */
+  function setEmbedder(e) {
+    embedder = e ?? null;
+    vecCache = null;
+    vectorWarm = null;
+    embedFailedLogged = false;
+  }
+
+  let vectorWarm = null;
+  /** 预热模型并给历史条目补算向量（只跑一次，失败就放弃本次运行） */
+  function ensureVectors() {
+    if (vectorWarm) return vectorWarm;
+    vectorWarm = (async () => {
+      if (!embedder) return false;
+      const ok = embedder.available() || (await embedder.warm?.());
+      if (!ok) return false;
+      const filled = await backfill({ limit: 500 });
+      if (filled) log(`共享记忆：已为 ${filled} 条历史记忆补算向量`);
+      return true;
+    })().catch(() => false);
+    return vectorWarm;
+  }
+
+  /** 写入后排队补算向量（250ms 合批，不阻塞回复） */
+  function queueEmbed(id, text) {
+    if (!embedder || !id || !text) return;
+    embedQueue.push({ id: Number(id), text: String(text) });
+    if (embedTimer) return;
+    embedTimer = setTimeout(() => {
+      embedTimer = null;
+      void flushEmbed();
+    }, 250);
+    if (typeof embedTimer.unref === 'function') embedTimer.unref();
+  }
+
+  const packVec = (vec) => Buffer.from(new Uint8Array(vec.buffer, vec.byteOffset, vec.byteLength));
+
+  /** 处理队列里的待补算条目（导出给测试/脚本用） */
+  async function flushEmbed() {
+    if (embedBusy || !embedder) return 0;
+    embedBusy = true;
+    let done = 0;
+    try {
+      const conn = open();
+      if (!conn) return 0;
+      if (!embedder.available()) {
+        const warmed = await embedder.warm?.();
+        if (!warmed) return 0;
+      }
+      const upd = conn.prepare('UPDATE memories SET embedding = ?, embed_model = ?, embed_dim = ? WHERE id = ?');
+      while (embedQueue.length) {
+        const batch = embedQueue.splice(0, EMBED_BATCH);
+        const vecs = await embedder.embed(batch.map((b) => b.text));
+        if (!vecs) {
+          if (!embedFailedLogged) {
+            embedFailedLogged = true;
+            log('⚠️ 共享记忆向量补算失败（稍后重试；失败期间语义召回不生效）');
+          }
+          embedQueue.unshift(...batch);
+          break;
+        }
+        for (let i = 0; i < batch.length; i += 1) {
+          const vec = vecs[i];
+          if (!vec) continue;
+          upd.run(packVec(vec), embedder.info().model, vec.length, batch[i].id);
+          done += 1;
+        }
+        vecCache = null;
+      }
+      return done;
+    } finally {
+      embedBusy = false;
+    }
+  }
+
+  /** 给还没有向量的条目补算（默认最多 200 条） */
+  async function backfill({ limit = 200 } = {}) {
+    if (!embedder) return 0;
+    const conn = open();
+    if (!conn) return 0;
+    if (!embedder.available()) {
+      const warmed = await embedder.warm?.();
+      if (!warmed) return 0;
+    }
+    const rows = conn.prepare('SELECT id, text FROM memories WHERE embedding IS NULL LIMIT ?')
+      .all(Math.max(1, Number(limit) || 200));
+    if (!rows.length) return 0;
+    const upd = conn.prepare('UPDATE memories SET embedding = ?, embed_model = ?, embed_dim = ? WHERE id = ?');
+    let done = 0;
+    for (let i = 0; i < rows.length; i += EMBED_BATCH) {
+      const batch = rows.slice(i, i + EMBED_BATCH);
+      const vecs = await embedder.embed(batch.map((r) => r.text));
+      if (!vecs) break;
+      for (let j = 0; j < batch.length; j += 1) {
+        const vec = vecs[j];
+        if (!vec) continue;
+        upd.run(packVec(vec), embedder.info().model, vec.length, Number(batch[j].id));
+        done += 1;
+      }
+    }
+    vecCache = null;
+    return done;
+  }
+
+  /** 把库里所有向量读进内存（几百~几万条都够用，10 万条再考虑引 sqlite-vec） */
+  function loadVecCache(conn) {
+    if (vecCache) return vecCache;
+    vecCache = new Map();
+    let rows = [];
+    try {
+      rows = conn.prepare('SELECT id, embedding FROM memories WHERE embedding IS NOT NULL').all();
+    } catch {
+      return vecCache;
+    }
+    for (const r of rows) {
+      try {
+        const copy = Uint8Array.from(r.embedding);
+        vecCache.set(Number(r.id), new Float32Array(copy.buffer, 0, Math.floor(copy.byteLength / 4)));
+      } catch { /* 坏行跳过 */ }
+    }
+    return vecCache;
+  }
+
+  /**
+   * 语义召回：拿「当前来信」的向量跟库里条目算余弦，取 top-k（已按 scope 过滤）。
+   * @param {Float32Array} queryVec 由 src/embeddings.mjs 算好的来信向量
+   */
+  function semanticFor(key, queryVec, { limit = 3, minScore = SEMANTIC_MIN_SCORE, excludeIds = [] } = {}) {
+    const conn = open();
+    if (!conn || !queryVec || !queryVec.length) return [];
+    const cache = loadVecCache(conn);
+    if (!cache.size) return [];
+    const skip = new Set((excludeIds || []).map(Number));
+    const rows = conn.prepare('SELECT * FROM memories').all();
+    const scored = [];
+    for (const r of rows) {
+      const id = Number(r.id);
+      if (skip.has(id)) continue;
+      const vec = cache.get(id);
+      if (!vec || vec.length !== queryVec.length) continue;
+      if (!scopeMatches(r.scope, key)) continue;
+      const score = cosine(queryVec, vec);
+      if (score < minScore) continue;
+      scored.push({ score, entry: toEntry(r) });
+    }
+    scored.sort((a, b) => b.score - a.score || b.entry.usedAt - a.entry.usedAt);
+    const picked = scored.slice(0, Math.max(1, Number(limit) || 3)).map((x) => x.entry);
+    touch(conn, picked.map((e) => e.id));
+    return picked;
+  }
+
   /**
    * 关键词检索（给 qq_memory_query 用）：≥3 字走 FTS5 trigram，1~2 字回退 LIKE。
    * 结果同样按 scope 过滤，命中会推进 used_at/hits。
@@ -425,22 +612,46 @@ export function createSharedMemory({
    * 唤醒时一次性拿到两段注入文本：
    *   text        —— 常驻的长期记忆（LRU）
    *   relatedText —— 与最近来信相关、但没被 LRU 带上的旧记忆
+   *
+   * @param {Float32Array} [opts.queryVec] 可选的来信向量；给了就额外做语义召回，
+   *        与「字重合」结果合并去重（字重合在前，语义补充在后）。
    */
-  function injectBundle(key, { recentText = '', maxEntries, maxChars, relatedLimit = 5 } = {}) {
+  function injectBundle(key, { recentText = '', maxEntries, maxChars, relatedLimit = 5, queryVec = null, minScore, semanticLimit = 3 } = {}) {
     const conn = open();
-    if (!conn) return { text: '', relatedText: '', injectedIds: [], relatedIds: [] };
+    if (!conn) return { text: '', relatedText: '', injectedIds: [], relatedIds: [], semanticIds: [] };
     const { lines, ids } = pickEntries(key, { maxEntries, maxChars });
     const related = relatedFor(key, recentText, { limit: relatedLimit, excludeIds: ids });
+    const relatedIds = new Set(related.map((e) => e.id));
+    // 语义召回补在字重合之后：字面对不上的同义表达靠这一层捞回来
+    let semantic = [];
+    if (queryVec) {
+      try {
+        semantic = semanticFor(key, queryVec, {
+          limit: Math.max(1, Number(semanticLimit) || 3),
+          minScore,
+          excludeIds: [...ids, ...relatedIds]
+        });
+      } catch (error) {
+        log(`⚠️ 语义召回失败（本轮回退字重合）：${error?.message ?? error}`);
+      }
+    }
     if (lines.length) touch(conn, ids);
     const text = lines.length
       ? `【共享记忆】这些是你在别的聊天里也适用的长期记忆（${lines.length} 条，来自以往交流）：\n${lines.join('\n')}`
       : '';
-    const relatedText = related.length
-      ? `【相关记忆】以前聊到过、和当前话题对得上的记录（${related.length} 条）：\n${related
+    const relatedAll = [...related, ...semantic];
+    const relatedText = relatedAll.length
+      ? `【相关记忆】以前聊到过、和当前话题对得上的记录（${relatedAll.length} 条）：\n${relatedAll
         .map((e) => `- ${e.text}（${KIND_LABEL[e.kind] || '记录'}）`)
         .join('\n')}`
       : '';
-    return { text, relatedText, injectedIds: ids, relatedIds: related.map((e) => e.id) };
+    return {
+      text,
+      relatedText,
+      injectedIds: ids,
+      relatedIds: related.map((e) => e.id),
+      semanticIds: semantic.map((e) => e.id)
+    };
   }
 
   function remove({ id, text } = {}) {
@@ -460,12 +671,16 @@ export function createSharedMemory({
     const conn = open();
     if (!conn) return { ok: false, error: broken || '共享记忆库不可用' };
     const total = Number(conn.prepare('SELECT COUNT(*) AS n FROM memories').get()?.n ?? 0);
+    let embedded = 0;
+    try {
+      embedded = Number(conn.prepare('SELECT COUNT(*) AS n FROM memories WHERE embedding IS NOT NULL').get()?.n ?? 0);
+    } catch { /* 老库还没迁移 */ }
     const byScope = {};
     for (const row of conn.prepare('SELECT scope, COUNT(*) AS n FROM memories GROUP BY scope').all()) {
       const label = row.scope.startsWith('key:') ? `key:${row.scope.slice(4)}` : (SCOPE_LABELS[row.scope] || row.scope);
       byScope[label] = Number(row.n);
     }
-    return { ok: true, total, byScope };
+    return { ok: true, total, byScope, embedded, embed: embedder ? embedder.info() : { enabled: false, status: 'off' } };
   }
 
   /** 供导入脚本使用：批量写入（默认落在各自的 key scope 下，不会互相串味） */
@@ -488,5 +703,9 @@ export function createSharedMemory({
     db = null;
   }
 
-  return { append, listFor, listAll, countByScope, injectFor, injectBundle, search, relatedFor, remove, stats, importMany, close, scopeMatches, _dbPath: dbPath };
+  return {
+    append, listFor, listAll, countByScope, injectFor, injectBundle, search, relatedFor,
+    setEmbedder, ensureVectors, queueEmbed, flushEmbed, backfill, semanticFor,
+    remove, stats, importMany, close, scopeMatches, _dbPath: dbPath
+  };
 }
