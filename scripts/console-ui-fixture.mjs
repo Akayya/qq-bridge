@@ -480,11 +480,12 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
             ok: true,
             role: '小鲸鱼',
             entries: [
-              { id: 'g1', text: '最近老爱说“绷”', kind: 'quirk', kindLabel: '习惯', at: '2026-10-28T09:00:00.000Z', sourceKey: 'private:10001' },
-              { id: 'g2', text: '喜欢在晚上聊吃的', kind: 'preference', kindLabel: '喜好', at: '2026-10-28T10:30:00.000Z', sourceKey: 'private:10001' }
+              { id: 'g1', text: '最近老爱说“绷”', kind: 'quirk', kindLabel: '习惯', at: '2026-10-28T09:00:00.000Z', sourceKey: 'private:10001', status: 'approved' },
+              { id: 'g2', text: '喜欢在晚上聊吃的', kind: 'preference', kindLabel: '喜好', at: '2026-10-28T10:30:00.000Z', sourceKey: 'private:10001', status: 'approved' },
+              { id: 'g3', text: '好像越来越爱用省略号…', kind: 'quirk', kindLabel: '习惯', at: '2026-10-29T08:10:00.000Z', sourceKey: 'group:123456789', status: 'pending' }
             ],
             format: '【人设成长】最近慢慢长出来的部分（管理员认可，不是硬规则；别主动说明来源）：1) 最近老爱说“绷”；2) 喜欢在晚上聊吃的',
-            stats: { roles: 1, entries: 2, chars: 22, maxEntries: 8, maxTotalChars: 600, maxTextLen: 80 }
+            stats: { roles: 1, entries: 2, chars: 22, pending: 1, maxEntries: 8, maxTotalChars: 600, maxPending: 12, maxTextLen: 80 }
           });
           case '/api/socialV2/states': return json({ ok: true, conversations: state.sessions.map(x => ({ key: x.key, phase: 'diving', unreadCount: 2 })) });
           case '/api/socialV2/initial-prompt': {

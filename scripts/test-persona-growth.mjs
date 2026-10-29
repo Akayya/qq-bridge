@@ -15,8 +15,9 @@ const ok = (cond, name, extra = '') => {
   else { fail += 1; console.log(`  ❌ ${name}${extra ? ` — ${extra}` : ''}`); }
 };
 
-const { ownerQQ: OWNER_QQ, peerQQ: PEER_QQ } = resolveChatTargets();
+const { ownerQQ: OWNER_QQ, groupQQ: GROUP_QQ, peerQQ: PEER_QQ } = resolveChatTargets();
 const OWNER = `private:${OWNER_QQ}`;
+const GROUP = `group:${GROUP_QQ}`;
 const OTHER = `private:${PEER_QQ}`;
 
 function unitTests() {
@@ -41,8 +42,33 @@ function unitTests() {
   const fmt = grow.format('小鲸鱼');
   ok(fmt.includes('【人设成长】') && fmt.includes('绷'), 'format() 可供注入', fmt.slice(0, 60));
 
+  // 待审：任何聊天都能提交，但不生效（不注入）
+  const pend = grow.add({ role: '小鲸鱼', text: '好像越来越爱用省略号…', kind: 'quirk', sourceKey: GROUP, status: 'pending' });
+  ok(pend.ok && pend.status === 'pending', '可以提交待审条目', JSON.stringify(pend).slice(0, 120));
+  ok(!grow.format('小鲸鱼').includes('省略号'), '待审条目不注入提示词');
+  ok(grow.list({ role: '小鲸鱼', status: 'pending' }).length === 1, 'list(status=pending) 能筛出来');
+  ok(grow.stats().pending === 1, 'stats() 报待审数量', JSON.stringify(grow.stats()));
+
+  const ap = grow.approve({ role: '小鲸鱼', id: pend.id });
+  ok(ap.ok && grow.format('小鲸鱼').includes('省略号'), '通过后立刻生效', JSON.stringify(ap).slice(0, 100));
+  const ap2 = grow.approve({ role: '小鲸鱼', id: pend.id });
+  ok(ap2.ok && ap2.already === true, '重复通过是无害操作');
+
+  const manyPending = createPersonaGrowth({ filePath: path.join(dir, 'p3.json'), maxPending: 2, log: () => {} });
+  manyPending.add({ role: 'R', text: 'p1', status: 'pending' });
+  manyPending.add({ role: 'R', text: 'p2', status: 'pending' });
+  const overflow = manyPending.add({ role: 'R', text: 'p3', status: 'pending' });
+  ok(!overflow.ok && /待审条目已满 2 条/.test(overflow.error), '待审数量有上限', overflow.error);
+
+  const fullApprove = createPersonaGrowth({ filePath: path.join(dir, 'p4.json'), maxEntries: 1, log: () => {} });
+  fullApprove.add({ role: 'R', text: '已生效' });
+  const p2 = fullApprove.add({ role: 'R', text: '待通过', status: 'pending' });
+  const blocked = fullApprove.approve({ role: 'R', id: p2.id });
+  ok(!blocked.ok && /已满 1 条/.test(blocked.error), '已生效满了不通过待审', blocked.error);
+
+  const countBeforeDup = grow.list({ role: '小鲸鱼' }).length;
   const dup = grow.add({ role: '小鲸鱼', text: '最近老爱说“绷”' });
-  ok(dup.ok && dup.duplicate === true && grow.list({ role: '小鲸鱼' }).length === 1, '同一条不重复加');
+  ok(dup.ok && dup.duplicate === true && grow.list({ role: '小鲸鱼' }).length === countBeforeDup, '同一条不重复加');
 
   const sanitized = grow.add({ role: '小鲸鱼', text: '口令是 tk_abcdef 别记' });
   ok(sanitized.ok && grow.list({ role: '小鲸鱼' }).some((e) => e.text.includes('[redacted]')), 'sanitize 生效');
@@ -129,8 +155,15 @@ async function httpTests() {
     console.log('  ⚠️ 没有管理员会话令牌，跳过 agent 通道用例');
   }
   if (otherToken) {
-    const deny = await post('/api/socialV2/persona-growth', { key: OTHER, op: 'add', text: `${marker}-peer` }, { 'x-agent-token': otherToken, 'x-agent-call': '1' });
-    ok(deny.status === 403 && /只有管理员/.test(String(deny.data?.error || '')), '非管理员会话写被拒', JSON.stringify(deny.data).slice(0, 120));
+    // 非管理员会话：可以提交，但落成待审、不生效（新行为，取代原来的 403）
+    const submit = await post('/api/socialV2/persona-growth', { key: OTHER, op: 'add', text: `${marker}-peer`, kind: 'quirk' }, { 'x-agent-token': otherToken, 'x-agent-call': '1' });
+    ok(submit.status === 200 && submit.data.ok && submit.data.pendingReview === true, '非管理员会话提交落成待审', JSON.stringify(submit.data).slice(0, 160));
+    ok(!String(submit.data.format || '').includes(`${marker}-peer`), '待审条目不进注入文本');
+    const removed = await post('/api/socialV2/persona-growth', { key: OTHER, op: 'remove', id: submit.data.id }, { 'x-agent-token': otherToken, 'x-agent-call': '1' });
+    ok(removed.status === 403 && /只有管理员/.test(String(removed.data?.error || '')), '非管理员会话不能删改', JSON.stringify(removed.data).slice(0, 120));
+    // 控制台通过 → 生效
+    const approve = await post('/api/socialV2/persona-growth', { op: 'approve', id: submit.data.id });
+    ok(approve.status === 200 && approve.data.ok && String(approve.data.format || '').includes(`${marker}-peer`), '控制台通过后生效', JSON.stringify(approve.data).slice(0, 140));
   }
 
   const after = await get('/api/socialV2/persona-growth?all=1');

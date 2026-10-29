@@ -6938,7 +6938,9 @@ async function main() {
         }
         // ── 人设成长层（state/persona-growth.json）──────────────────────────
         // 人设卡是骨架（管理端写），这里只存「聊天里慢慢长出来的软组织」：
-        // 新口头禅、新习惯、和某人的关系变化。写入只允许管理员（ownerQQ）会话触发。
+        // 新口头禅、新习惯、和某人的关系变化。
+        // 写入策略：任何聊天里 bot 都可以「提交」一条 → 落成 pending，不注入提示词；
+        //           管理员会话（ownerQQ 私聊）里写的直接生效；控制台可直接改。
         if (req.method === 'GET' && url.pathname === '/api/socialV2/persona-growth') {
           const grow = getPersonaGrowth();
           const role = readRoleState().role;
@@ -6971,22 +6973,47 @@ async function main() {
             sendJson({ ok: false, error: 'key 不能为空' }, 400);
             return;
           }
-          // 写闸门：智能体必须是管理员会话；管理端（控制台令牌）可直接改。
-          if (isAgentCall && !(token && agentTokenIsOwner(token))) {
-            sendJson({ ok: false, error: '只有管理员（ownerQQ）的私聊能改人设成长，别的聊天一律拒绝' }, 403);
+          // 写闸门：任何会话都能「提交」（落成待审，不生效）；
+          // 直接生效 / 删除 / 清空 / 通过待审，必须是管理员会话或控制台。
+          const isOwnerCall = Boolean(token) && agentTokenIsOwner(token);
+          const privileged = !isAgentCall || isOwnerCall;
+          if (!privileged && op !== 'add') {
+            sendJson({ ok: false, error: '只有管理员（ownerQQ）的私聊能删改人设成长；别的聊天可以提交待审条目' }, 403);
             return;
           }
           const role = readRoleState().role;
           const grow = getPersonaGrowth();
           if (op === 'add') {
-            const r = grow.add({ role, text: body.text, kind: body.kind, sourceKey: key });
+            const wantStatus = isAgentCall && !isOwnerCall ? 'pending' : (body.status === 'pending' ? 'pending' : 'approved');
+            const r = grow.add({ role, text: body.text, kind: body.kind, sourceKey: key, status: wantStatus });
             if (!r.ok) {
               const privacy = /敏感信息/.test(r.error);
               sendJson({ ok: false, error: r.error }, privacy ? 403 : 400);
               return;
             }
-            log(`人设成长：${key || '（控制台）'} +1「${String(body.text ?? '').slice(0, 30)}」`);
-            sendJson({ ok: true, role, id: r.id, duplicate: !!r.duplicate, entries: grow.list({ role }), format: grow.format(role), stats: grow.stats() });
+            if (r.status === 'pending') {
+              log(`人设成长待审：${key || '（控制台）'} 提交「${String(body.text ?? '').slice(0, 30)}」（等管理员通过）`);
+            } else {
+              log(`人设成长：${key || '（控制台）'} +1「${String(body.text ?? '').slice(0, 30)}」`);
+            }
+            sendJson({
+              ok: true,
+              role,
+              id: r.id,
+              status: r.status,
+              pendingReview: r.status === 'pending',
+              duplicate: !!r.duplicate,
+              hint: r.status === 'pending' ? '已记下，等管理员通过后才算数（这条现在不会影响你说话）' : '',
+              entries: grow.list({ role }),
+              format: grow.format(role),
+              stats: grow.stats()
+            });
+            return;
+          }
+          if (op === 'approve') {
+            const r = grow.approve({ role, id: body.id });
+            if (!r.ok) { sendJson({ ok: false, error: r.error }, 400); return; }
+            sendJson({ ok: true, role, id: r.id, already: !!r.already, entries: grow.list({ role }), format: grow.format(role), stats: grow.stats() });
             return;
           }
           if (op === 'remove') {

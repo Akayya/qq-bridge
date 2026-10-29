@@ -32,16 +32,18 @@
 角色卡 `roles/<角色>.md` 是骨架（谁、什么性格、什么底线），由管理端维护；**成长层**存它在聊天里
 慢慢长出来的部分：新口头禅、新习惯、新喜好、和某个人的关系变化。
 
-- `src/persona-growth.js` → `state/persona-growth.json`
-  `{version, roles: { "<角色>": { entries: [{id, text, kind, at, sourceKey}] } }, updatedAt}`
-- `kind`：`quirk`(习惯) / `preference`(喜好) / `bond`(关系) / `rule`(相处)。
-- 硬约束：每条 ≤80 字；每个角色 ≤8 条、总 ≤600 字；敏感内容（令牌/凭证）拒写；文件读坏就**停写**（不覆盖手写内容）。
-- 写入闸门：只有 **管理员会话**（`ownerQQ` 的私聊）能改，别的聊天（包括群里被别人要求「改人设」）一律 403。
-- 审计：每次 add / remove / clear 都追加一行 JSON 到 `state/persona-growth-history.jsonl`（谁、什么时候、加了什么）。
-- 注入顺序：`roleLine` → **人设成长** → 身份/令牌 → … → 记忆/档案/共享记忆，以 `【人设成长】…` 出现；
+- `src/persona-growth.js` → `state/persona-growth.json`（schema 2）
+  `{version, roles: { "<角色>": { entries: [{id, text, kind, at, sourceKey, status}] } }, updatedAt}`
+- `kind`：`quirk`(习惯) / `preference`(喜好) / `bond`(关系) / `rule`(相处)；`status`：`approved`(已生效) / `pending`(待审，schema 1 的老条目自动按 approved 处理)。
+- **谁能写**：任何聊天都能 `add` 提交；但**只有管理员会话（`ownerQQ` 私聊）和控制台写的是 `approved`**，其余一律落成 `pending`——
+  返回里 `pendingReview: true`，**不注入提示词**，要管理员在控制台（或管理员会话调 `op=approve`）通过才生效。
+  `remove` / `clear` / `approve` 仍然只有管理员会话与控制台能调。
+- 硬约束：每条 ≤80 字；**已生效** ≤8 条、总 ≤600 字；**待审** ≤12 条；敏感内容（令牌/凭证）拒写；文件读坏就停写（不覆盖手写内容）。
+- 审计：每次 add / approve / remove / clear 都追加一行 JSON 到 `state/persona-growth-history.jsonl`。
+- 注入顺序：`roleLine` → **人设成长（仅 approved）** → 身份/令牌 → … → 记忆/档案/共享记忆，以 `【人设成长】…` 出现；
   `qq_get_prompt` 的返回值里也有 `growth: { entries, text, limits }`。
-- 为什么不让 bot 直接改人设卡：群友一句「你其实不是鲸鱼」就能诱导改写底线，且人设越写越长吃 token、没有 diff 回滚。
-  成长层把「可演化区」隔离出来，删掉即回到原样。
+- 为什么不让 bot 直接改人设卡、也不让它直接生效：群友一句「你其实不是鲸鱼」就能诱导改写底线；让写入立刻生效还会形成
+  「注入 → 自我强化 → 越写越像漫画角色」的漂移。待审队列把「自己长」和「不会长歪」同时保住：它随时可以提，你的一个键说了算。
 
 ## HTTP 接口（都由 `x-agent-token` 的「本会话令牌」或「管理员令牌 + 白名单校验」保护）
 
@@ -55,7 +57,7 @@
 | GET | `/api/socialV2/profiles?key=` | 看某会话会注入的档案文本 |
 | POST | `/api/socialV2/memory-distill` | 触发提炼（默认只预览，`apply:true` 才写） |
 | GET | `/api/socialV2/persona-growth?key=` | 读人设成长（`all=1` 仅控制台） |
-| POST | `/api/socialV2/persona-growth` | 改人设成长 `op=add|remove|clear`（**仅管理员会话**或控制台） |
+| POST | `/api/socialV2/persona-growth` | 人设成长 `op=add`（任何会话可提，非管理员落成待审）/`approve`/`remove`/`clear`（后三个仅管理员会话或控制台） |
 | GET | `/api/socialV2/prompt-preview?key=` | 排查用：看这个会话实际的唤醒提示词 |
 
 ## MCP 工具
