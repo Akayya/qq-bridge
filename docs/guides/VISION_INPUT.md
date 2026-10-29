@@ -71,6 +71,10 @@ node scripts/test-vision-media.mjs      # 桥接投递与端点（5 项）
 ## 5. 关于 ffmpeg
 
 图片压缩依赖 ffmpeg（`FFMPEG_PATH` 或 `config.json` 的 `socialV2.voice.ffmpegPath`）。
+本机已把它统一放在 `tools\ffmpeg\bin\ffmpeg.exe`，配置里对应
+`"socialV2": { "voice": { "ffmpegPath": "D:/DSH_QQ_BOT/tools/ffmpeg/bin/ffmpeg.exe" } }`；
+重装或换机时跑 `node scripts/setup-ffmpeg.mjs`（从 npm 包取静态构建，比官网快几十倍）。
+目录约定见 `docs/guides/FILE_LAYOUT.md`。
 没有 ffmpeg 时会出现：
 
 - `[media] 图片N: 压缩失败（找不到 ffmpeg…），按原图提供` —— 原图仍能发，只是没压缩；
