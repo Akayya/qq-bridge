@@ -1445,6 +1445,17 @@ async function main() {
   for (const item of (Array.isArray(cfg.dsh?.effortUnsupported) ? cfg.dsh.effortUnsupported : [])) {
     noEffortModels.add(String(item));
   }
+  // 有些第三方通道（阿里百炼 alibaifan 等）的模型在 DSH 目录里没有声明 image 输入能力，
+  // 带图片的 session/prompt 会被 DSH 直接拒绝：`model "..." does not declare image input`。
+  // 撞到过的 provider/model 记在这里（并持久化到 config.json 的 dsh.visionUnsupported），
+  // 之后这类模型一律改走「OCR 取字 + 纯文本」投递，不再把注定被拒的图片塞进去。
+  const noVisionModels = new Set(); // `${provider}/${model}`
+  for (const item of (Array.isArray(cfg.dsh?.visionUnsupported) ? cfg.dsh.visionUnsupported : [])) {
+    noVisionModels.add(String(item));
+  }
+  if (noVisionModels.size) {
+    log(`这些模型不支持图片输入，图片一律转成 OCR 文字：${[...noVisionModels].join('、')}`);
+  }
 
   fs.mkdirSync(STATE_DIR, { recursive: true });
   hardenStateDirAcl();
@@ -7400,8 +7411,32 @@ async function main() {
             return;
           }
           try {
-            const images = await fetchMediaData(media);
-            sendJson({ ok: true, messageId, media, images });
+            let images = await fetchMediaData(media);
+            // 当前模型没声明图片输入时，图像块会让整条工具调用被 DSH 拒掉
+            // （AcpContentError: model "..." does not declare image input）。
+            // 这里直接把「看图」换成「读字」：文字仍能进模型，图片本身不投递。
+            let visionNote = '';
+            if (noVisionModels.has(currentChatModelKey()) && images.some((item) => item?.data)) {
+              const converted = [];
+              for (const item of images) {
+                if (!item?.data) { converted.push(item); continue; }
+                let text = item.text ? `${item.text} ` : '';
+                try {
+                  const ocr = await ocrImageBuffer(Buffer.from(String(item.data), 'base64'), {
+                    ext: extFromMime(item.mimeType),
+                    timeoutMs: 20000
+                  });
+                  const raw = ocr?.ok ? String(ocr.text ?? '').trim() : '';
+                  text += raw ? `（OCR：${raw.slice(0, 1200)}）` : '（这张图里没识别出文字）';
+                } catch (error) {
+                  text += `（OCR 失败：${error?.message ?? error}）`;
+                }
+                converted.push({ ...item, data: undefined, text });
+              }
+              images = converted;
+              visionNote = '当前模型不支持图片输入，已改为 OCR 文字';
+            }
+            sendJson({ ok: true, messageId, media, images, ...(visionNote ? { note: visionNote } : {}) });
           } catch (error) {
             log(`图片查询失败 ${key} ${messageId}: ${error?.message ?? error}`);
             sendJson({ ok: false, error: `图片查询失败：${error?.message ?? error}` }, 500);
@@ -8554,7 +8589,7 @@ async function main() {
     return { text: fallbackText };
   }
 
-  async function resolveMediaList(mediaList) {
+  async function resolveMediaList(mediaList, { textOnly = false } = {}) {
     const parts = [];
     let index = 0;
     let totalBytes = 0;
@@ -8567,6 +8602,11 @@ async function main() {
       if (!media || typeof media !== 'object') continue;
       if (media.kind === 'face') {
         const face = await fetchFaceMedia(media);
+        if (textOnly) {
+          // 当前模型看不了图：小表情本来就只能靠名字/描述表达，OCR 也读不出什么。
+          parts.push({ type: 'text', text: face.text || `[表情#${media.faceId ?? index}]` });
+          continue;
+        }
         const prep = face.buffer ? await toModelMedia(face.buffer, face.mimeType, `表情#${media.faceId ?? index}`) : null;
         if (prep?.ok) {
           if (totalBytes + prep.buffer.length > MAX_MEDIA_BYTES) {
@@ -8586,6 +8626,28 @@ async function main() {
       } else {
         const img = await fetchOneBotImage(media);
         const sticker = media.kind === 'sticker';
+        if (textOnly) {
+          const fallbackLabel = sticker ? `[表情${index}]` : `[图片${index}]`;
+          if (!img?.buffer) {
+            parts.push({ type: 'text', text: `${fallbackLabel}（获取失败）` });
+            continue;
+          }
+          let note = '';
+          try {
+            const ocr = await ocrImageBuffer(img.buffer, {
+              ext: extFromMime(img.mimeType, img.url),
+              timeoutMs: 20000
+            });
+            const text = ocr?.ok ? String(ocr.text ?? '').trim() : '';
+            note = text
+              ? `（当前模型不支持看图，下面是 OCR 识别出的文字：\n${text.slice(0, 1200)}）`
+              : '（当前模型不支持看图，这张图里也没识别出文字）';
+          } catch (error) {
+            note = `（当前模型不支持看图，OCR 也失败了：${error?.message ?? error}）`;
+          }
+          parts.push({ type: 'text', text: `${fallbackLabel}${note}` });
+          continue;
+        }
         const summary = sticker && media.summary ? `:${String(media.summary).slice(0, 20)}` : '';
         const label = sticker ? (summary ? `[表情${summary}]` : `[表情${index}]`) : `[图片${index}]`;
         const prep = img?.buffer ? await toModelMedia(img.buffer, img.mimeType, `${label}`) : null;
@@ -8845,6 +8907,27 @@ async function main() {
       atomicWriteJson(configFile, file);
     } catch (error) {
       log(`记住「${modelKey} 不支持思考强度」失败（本次运行内仍然生效）：${error?.message ?? error}`);
+    }
+  }
+  /** 当前 bot 使用的 provider/model（每个 DSH 会话首次使用时按 config.json 应用）。 */
+  function currentChatModelKey() {
+    return `${cfg.dsh?.provider ?? ''}/${cfg.dsh?.model ?? ''}`;
+  }
+  /** 这条通道不吃图片输入：记进 config.json，重启后仍然生效。 */
+  function rememberNoVisionModel(modelKey) {
+    if (!modelKey || noVisionModels.has(modelKey)) return;
+    noVisionModels.add(modelKey);
+    try {
+      const configFile = path.join(ROOT, 'config.json');
+      const configObject = readConfigObject(configFile);
+      const list = Array.isArray(configObject.dsh?.visionUnsupported) ? configObject.dsh.visionUnsupported.map(String) : [];
+      if (!list.includes(modelKey)) {
+        configObject.dsh = { ...(configObject.dsh ?? {}), visionUnsupported: [...list, modelKey] };
+        atomicWriteJson(configFile, configObject);
+      }
+      log(`模型 ${modelKey} 不支持图片输入：之后只用 OCR 文字理解图片（已记入 config.json 的 dsh.visionUnsupported）`);
+    } catch (error) {
+      log(`记住「${modelKey} 不支持图片输入」失败（本次运行内仍然生效）：${error?.message ?? error}`);
     }
   }
   // 返回 'applied' | 'not-found' | 'failed'。
@@ -10094,20 +10177,42 @@ async function main() {
         log(`[memewiki] 预查失败（${key}）：${error?.message ?? error}`);
       }
     }
-    let content = [{ type: 'text', text: withSlangContext(promptText) }];
-    if (Array.isArray(opts.media) && opts.media.length > 0) {
-      const imageParts = await resolveMediaList(opts.media);
-      content = [{ type: 'text', text: withSlangContext(promptText) }, ...imageParts];
-    }
+    const chatModelKey = currentChatModelKey();
+    const hasMedia = Array.isArray(opts.media) && opts.media.length > 0;
+    const baseText = withSlangContext(promptText);
+    const buildContent = async (textOnly) => {
+      if (!hasMedia) return [{ type: 'text', text: baseText }];
+      const parts = await resolveMediaList(opts.media, { textOnly });
+      return [{ type: 'text', text: baseText }, ...parts];
+    };
+    // 这个模型之前就撞过「不支持图片输入」：直接走 OCR 文字，省掉一次注定失败的投递。
+    const visionBlocked = noVisionModels.has(chatModelKey);
+    let content = await buildContent(visionBlocked);
     // 媒体解析成功后再标记退场，避免解析异常时残留退场标记。
     if (!isCurrentSession(key, sessionId)) throw new Error('投递前会话已重置或权限已变化');
     if (opts.farewell) social.exitingSessions.add(sessionId);
+    /** DSH 拒绝图片输入的报错文案（因通道而异，宁可放宽一点）。 */
+    const looksLikeVisionRejection = (message) =>
+      /declare image input|does not (?:declare|support) (?:image|vision)|image input|input_image|image content|multimodal/i.test(String(message ?? ''));
     let accepted;
     try {
       accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content });
     } catch (error) {
-      if (opts.farewell) social.exitingSessions.delete(sessionId);
-      throw error;
+      const message = String(error?.message ?? error);
+      if (!hasMedia || visionBlocked || !looksLikeVisionRejection(message)) {
+        if (opts.farewell) social.exitingSessions.delete(sessionId);
+        throw error;
+      }
+      // 通道不支持图片：记下来，改成 OCR 文字后重投一次。
+      rememberNoVisionModel(chatModelKey);
+      content = await buildContent(true);
+      accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content });
+    }
+    if (!accepted.result.ok && hasMedia && !visionBlocked
+        && looksLikeVisionRejection(`${accepted.result.error?.code ?? ''} ${accepted.result.error?.message ?? ''}`)) {
+      rememberNoVisionModel(chatModelKey);
+      content = await buildContent(true);
+      accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content });
     }
     if (!accepted.result.ok) {
       if (opts.farewell) social.exitingSessions.delete(sessionId);

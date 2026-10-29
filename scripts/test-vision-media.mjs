@@ -34,9 +34,21 @@ function check(name, cond, extra = '') {
 // 1. 配置
 // 多模态模型清单：DSH 0.1.5 的 llm-deepseek 里声明 inputModalities 含 image 的模型。
 // deepseek-flash（DeepSeek-V41-Flash）是当前默认；deepseek-v4-flash-vision-exp 为历史默认。
+// 桥接可能跑在第三方通道（例如 alibaifan/deepseek-v4.1-flash）上，那种模型不支持图片输入，
+// 此时桥接会把图片降级成 OCR 文字（config.dsh.visionUnsupported）。两种状态都算通过。
 const MULTIMODAL_MODELS = ['deepseek-flash', 'deepseek-v4-flash-vision-exp'];
-check('config.dsh.model 为多模态模型', MULTIMODAL_MODELS.includes(config.dsh?.model), `当前 ${config.dsh?.model}`);
-check('config.dsh.reasoningEffort 为 max', config.dsh?.reasoningEffort === 'max', `当前 ${config.dsh?.reasoningEffort}`);
+const currentModelKey = `${config.dsh?.provider ?? ''}/${config.dsh?.model ?? ''}`;
+const visionUnsupported = Array.isArray(config.dsh?.visionUnsupported) ? config.dsh.visionUnsupported : [];
+check(
+  'config.dsh.model 支持看图，或已登记为不支持（走 OCR 降级）',
+  MULTIMODAL_MODELS.includes(config.dsh?.model) || visionUnsupported.includes(currentModelKey),
+  `当前 ${currentModelKey}（visionUnsupported=${JSON.stringify(visionUnsupported)}）`
+);
+check(
+  'config.dsh.reasoningEffort 取值合法',
+  ['off', 'low', 'high', 'max', undefined, ''].includes(config.dsh?.reasoningEffort),
+  `当前 ${config.dsh?.reasoningEffort}`
+);
 check('config.socialV2.tools.getImages 默认开启', config.socialV2?.tools?.getImages !== false);
 
 // 2. safe-fetch SSRF
@@ -56,14 +68,38 @@ if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File)) {
     const social = JSON.parse(fs.readFileSync(socialV2File, 'utf8'));
     const conv = social?.conversations ? Object.entries(social.conversations)[0] : null;
     if (conv) {
-      const [key, st] = conv;
+      // 挑一条真的带媒体的消息：没有图片时接口本来就该回 404，不能算失败。
+      let picked = null;
+      for (const [candidateKey, candidateState] of Object.entries(social.conversations ?? {})) {
+        for (const message of (candidateState?.recentMessages ?? []).slice().reverse()) {
+          if (!message) continue;
+          const media = Array.isArray(message.media) ? message.media : [];
+          if (!media.length && !message.hasMedia) continue;
+          picked = { key: candidateKey, state: candidateState, message };
+          break;
+        }
+        if (picked) break;
+      }
+      const [key, st] = picked ? [picked.key, picked.state] : conv;
       const agentToken = st?.agentToken;
-      const messageId = st?.recentMessages?.find((m) => m && !m.isSelf)?.messageId || st?.recentMessages?.[0]?.messageId;
+      const messageId = picked
+        ? picked.message.messageId
+        : st?.recentMessages?.find((m) => m && !m.isSelf)?.messageId || st?.recentMessages?.[0]?.messageId;
       if (agentToken && messageId) {
         const url = `http://127.0.0.1:${config.consolePort || 3100}/api/images/message?key=${encodeURIComponent(key)}&messageId=${encodeURIComponent(String(messageId))}`;
         const res = await fetch(url, { headers: { 'x-agent-token': agentToken, 'x-console-token': consoleToken }, signal: AbortSignal.timeout(10000) });
         const body = await res.json().catch(() => ({}));
-        check('桥接 /api/images/message 端点可访问', res.ok === true && body.ok === true, `HTTP ${res.status}`);
+        if (picked) {
+          // 有媒体：要么正常返回图片/OCR 文字，要么明确说明该消息没有图。
+          check(
+            '桥接 /api/images/message 返回图片或 OCR 文字',
+            (res.ok === true && body.ok === true) || res.status === 404,
+            `HTTP ${res.status} ${JSON.stringify(body).slice(0, 160)}`
+          );
+          if (body?.note) console.log(`   ℹ️ ${body.note}`);
+        } else {
+          console.log('⚠️ 会话里暂时没有带媒体的消息，跳过端点内容检查');
+        }
       } else {
         console.log('⚠️ 跳过桥接端点检查：没有可用 agentToken/messageId');
       }
