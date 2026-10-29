@@ -241,7 +241,7 @@ test('守卫仍放行 QQ MCP 命名空间与无害模型侧工具', async () => 
         `${id}: MCP 前缀 ${prefix} 应放行`,
       );
     }
-    for (const name of ['ask_user_question', 'todo_write']) {
+    for (const name of ['ask_user_question', 'todo_write', 'compress', 'decompress', 'search_context', 'acp_status']) {
       assert.equal(fakeTools._guard({ name }), undefined, `${id}: ${name} 应放行`);
     }
     // 未知工具名必须 fail-closed。

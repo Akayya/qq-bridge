@@ -220,9 +220,20 @@ const SAFE_PREFIXES = [
 
 // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，
 // todo_write 仅维护任务列表。若后续 preset 不再挂载这些工具，保留无害。
+//
+// 上下文管理工具（compress / decompress / search_context / acp_*）也放行：
+// 它们只作用于**本会话自己的对话历史**，不碰文件、不起进程、读不到别处。
+// 2026-10-29 报障：QQ 会话里模型想压上下文时被 guard 拒掉
+// （“工具 "compress" 不在 QQ 桥接白名单内”），长会话只能硬扛 token。
 const SAFE_EXACT = new Set([
   'ask_user_question',
   'todo_write',
+  'compress',
+  'decompress',
+  'search_context',
+  'acp_status',
+  'acp_cache',
+  'acp_read_original_image',
 ])
 
 // ── 诊断落盘：restrict 失败时到底为什么 ────────────────────────────────────
