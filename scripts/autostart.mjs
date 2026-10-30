@@ -2,6 +2,8 @@
 //
 // 顺序：SnowLuma（launcher.bat）→ 等 OneBot 3000 端口 → 等 DSH 起来并校正 baseUrl →
 // 拉起 qq-bridge。任何一步已经在线就跳过，所以手动点一次也不会起重复实例。
+// 开机那条链（启动文件夹里的 vbs）带 --no-snowluma，只启桥接；手动双击
+// 桌面「启动QQ机器人.cmd」仍会顺带把 SnowLuma 拉起来。
 //
 // 用法：
 //   node scripts/autostart.mjs            # 正常自启流程
@@ -19,6 +21,20 @@ const LOG = path.join(ROOT, "logs", "autostart.log");
 const SNOWLUMA_DIR = process.env.SNOWLUMA_DIR || "D:/SnowLuma";
 const LAUNCHER = path.join(SNOWLUMA_DIR, "launcher.bat");
 const DRY = process.argv.includes("--dry-run");
+
+// 开机时是否顺手把 SnowLuma 也拉起来。
+// 优先级：`--no-snowluma` 参数（开机自启那条链用）> config.json 的
+// `autostart.launchSnowLuma` > 默认 true。
+// 关掉后不再等 3000 端口（桥接会自己重连，SnowLuma 起来后自然连上）。
+function launchSnowLumaEnabled() {
+  if (process.argv.includes("--no-snowluma")) return false;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, "config.json"), "utf8").replace(/^\uFEFF/, ""));
+    return cfg?.autostart?.launchSnowLuma !== false;
+  } catch {
+    return true;
+  }
+}
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}`;
@@ -112,9 +128,11 @@ if (DRY) {
   process.exit(0);
 }
 
-if (!snowlumaUp) {
+if (!snowlumaUp && launchSnowLumaEnabled()) {
   startSnowLuma();
   await waitPort(3000, 180000, "SnowLuma OneBot");
+} else if (!snowlumaUp) {
+  log("SnowLuma 未运行，但开机自启已关闭（--no-snowluma 或 config.autostart.launchSnowLuma=false），跳过启动与等待；桥接会自己重连");
 } else {
   log("SnowLuma 已在运行，跳过启动");
 }
