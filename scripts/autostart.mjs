@@ -1,13 +1,15 @@
-// 开机自启（Windows 登录时由启动文件夹里的 autostart.vbs 调起）。
+// 启动入口（默认**不装**开机自启：2026-10-30 起启动文件夹里的 vbs 已移除，
+// 只在你手动双击桌面「启动QQ机器人.cmd」时由它调起本脚本）。
 //
 // 顺序：SnowLuma（launcher.bat）→ 等 OneBot 3000 端口 → 等 DSH 起来并校正 baseUrl →
 // 拉起 qq-bridge。任何一步已经在线就跳过，所以手动点一次也不会起重复实例。
-// 开机那条链（启动文件夹里的 vbs）带 --no-snowluma，只启桥接；手动双击
-// 桌面「启动QQ机器人.cmd」仍会顺带把 SnowLuma 拉起来。
+// 想恢复「开机只启桥接」：把仓库里的 autostart.vbs（带 --no-snowluma）放进
+// 启动文件夹；想连 SnowLuma 一起自启：去掉那个参数。手动启动保持原样。
 //
 // 用法：
-//   node scripts/autostart.mjs            # 正常自启流程
-//   node scripts/autostart.mjs --dry-run  # 只检查当前状态，不启动任何东西
+//   node scripts/autostart.mjs              # 正常启动流程（SnowLuma + 桥接）
+//   node scripts/autostart.mjs --no-snowluma # 只启桥接，不动 SnowLuma
+//   node scripts/autostart.mjs --dry-run    # 只检查当前状态，不启动任何东西
 //
 // 日志：logs/autostart.log
 import { spawn } from "node:child_process";

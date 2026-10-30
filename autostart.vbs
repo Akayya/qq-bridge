@@ -1,7 +1,9 @@
-' Autostart entry for qq-bridge (template).
-' 放进「启动」文件夹后，它会在登录时隐藏运行 qq-bridge\autostart.cmd --no-snowluma：
-' 只拉起 qq-bridge（DSH 就绪后自动校正 baseUrl），SnowLuma 由你自己启动。
-' 想让开机时也顺带拉起 SnowLuma：把下面的 --no-snowluma 删掉即可。
+' 可选的开机自启入口（默认**不安装**：2026-10-30 起启动文件夹里已不再放这个文件，
+' 只保留手动双击桌面「启动QQ机器人.cmd」）。
+'
+' 想恢复开机自启，把本文件复制到「启动」文件夹：
+'   %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\
+' 默认带 --no-snowluma 只启桥接；想让 SnowLuma 也跟着自启就删掉这个参数。
 ' 位置解析顺序：环境变量 QQ_BRIDGE_HOME → 本脚本所在目录。
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set sh = CreateObject("WScript.Shell")
