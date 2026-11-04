@@ -63,6 +63,7 @@ import { createProfiles } from './profiles.js';
 import { createDistiller } from './memory-distill.js';
 import { createPersonaGrowth } from './persona-growth.js';
 import { createEmbedder } from './embeddings.mjs';
+import { createComfy } from './comfy.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -78,6 +79,10 @@ let profilesInstance = null;
 let distillerInstance = null;
 // 人设成长层（state/persona-growth.json）：懒初始化。
 let personaGrowthInstance = null;
+// 本机 ComfyUI（出图）：懒初始化；只在真出图时才探测/拉起进程，平时不碰。
+let comfyInstance = null;
+// 当前正在跑的出图任务（并发保护：一次只跑一个，避免抢显存）。
+const comfyJobs = { busy: false, startedAt: 0, prompt: '', key: '' };
 // 记忆自动提炼的定时器句柄（main() 里设置）。
 const memoryDistill = { timer: null };
 const STATE_FILE = path.join(STATE_DIR, 'sessions.json');
@@ -3490,6 +3495,7 @@ async function main() {
             || url.pathname.startsWith('/api/socialV2/')
             || url.pathname.startsWith('/api/send/')
             || url.pathname.startsWith('/api/images/')
+            || url.pathname.startsWith('/api/comfy/')
             || url.pathname === '/api/authorize/read'
             // 管理员自助：只有 owner 会话的令牌能过（路由内部还会再校验一次），
             // 所以放行到 agent 白名单不会顺带把控制台功能开给别的会话。
@@ -6952,6 +6958,99 @@ async function main() {
         // 新口头禅、新习惯、和某人的关系变化。
         // 写入策略：任何聊天里 bot 都可以「提交」一条 → 落成 pending，不注入提示词；
         //           管理员会话（ownerQQ 私聊）里写的直接生效；控制台可直接改。
+        // ── 本机 ComfyUI 出图 ───────────────────────────────────────────────
+        if (req.method === 'GET' && url.pathname === '/api/comfy/status') {
+          const comfy = getComfy();
+          const st = await comfy.status({ fresh: url.searchParams.get('fresh') === '1' });
+          sendJson({
+            ok: true,
+            ...st,
+            enabled: cfg.comfy?.enabled !== false,
+            busy: comfyJobs.busy,
+            job: comfyJobs.busy ? { startedAt: comfyJobs.startedAt, prompt: comfyJobs.prompt, key: comfyJobs.key } : null,
+            workflows: comfy.workflowNames(),
+            defaultWorkflow: String((cfg.comfy && cfg.comfy.workflow) || 'anima-turbo')
+          });
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/comfy/workflows') {
+          const comfy = getComfy();
+          const workflows = comfy.workflowNames().map((name) => {
+            let defaults = {};
+            try { defaults = comfy.loadTemplate(name).parsed?.__defaults ?? {}; } catch { defaults = {}; }
+            return { name, defaults };
+          });
+          sendJson({ ok: true, dir: comfy.workflowDir, workflows });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/comfy/cancel') {
+          const comfy = getComfy();
+          const r = await comfy.interrupt();
+          log(`[comfy] 已请求中断当前任务（HTTP ${r.status}）`);
+          sendJson({ ok: r.ok, status: r.status });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/comfy/draw') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const token = req.headers['x-agent-token'];
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (token && !agentTokenOkAny(key, token)) { sendJson({ ok: false, error: agentTokenErrText(key, token) }, 403); return; }
+          if (token && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (token && !v2ToolEnabled('comfy')) { sendJson({ ok: false, error: '工具未启用：qq_comfy_draw' }, 403); return; }
+          if (cfg.comfy?.enabled === false) { sendJson({ ok: false, error: '出图功能已关闭（config.json 的 comfy.enabled）' }, 403); return; }
+          const prompt = String(body.prompt ?? '').trim();
+          if (!prompt) { sendJson({ ok: false, error: 'prompt 不能为空' }, 400); return; }
+          if (comfyJobs.busy) {
+            const secs = comfyJobs.startedAt ? Math.round((Date.now() - comfyJobs.startedAt) / 1000) : 0;
+            sendJson({ ok: false, error: `正在画上一张（${secs}s）：「${comfyJobs.prompt}」，等它画完再来`, busy: true }, 409);
+            return;
+          }
+          comfyJobs.busy = true;
+          comfyJobs.startedAt = Date.now();
+          comfyJobs.prompt = prompt.slice(0, 60);
+          comfyJobs.key = key;
+          try {
+            const comfy = getComfy();
+            const started = await comfy.ensureRunning();
+            if (started.started) log(`[comfy] 已静默拉起 ComfyUI（${Math.round(started.elapsedMs / 1000)}s）`);
+            const result = await comfy.render({
+              workflow: body.workflow,
+              prompt,
+              negative: body.negative,
+              width: body.width,
+              height: body.height,
+              steps: body.steps,
+              seed: body.seed,
+              filename: `qq-${Date.now()}`
+            });
+            const shouldSend = body.send !== false;
+            let sent = null;
+            if (shouldSend) sent = await sendImageToChatV2(key, result.buffer, { label: '画好的图' });
+            log(`[comfy] 出图完成：${Math.round(result.bytes / 1024)}KB / ${Math.round(result.elapsedMs / 1000)}s（seed ${result.seed}，workflow ${result.workflow}）→ ${key}${shouldSend ? '（已发送）' : '（未发送）'}`);
+            sendJson({
+              ok: true,
+              key,
+              workflow: result.workflow,
+              promptId: result.promptId,
+              seed: result.seed,
+              file: path.relative(ROOT, result.file),
+              bytes: result.bytes,
+              elapsedMs: result.elapsedMs,
+              startedComfy: !!started.started,
+              sent: shouldSend ? (sent?.message_id ?? null) : null
+            });
+          } catch (error) {
+            log(`[comfy] 出图失败（${key}）：${error?.message ?? error}`);
+            sendJson({ ok: false, error: String(error?.message ?? error) }, 500);
+          } finally {
+            comfyJobs.busy = false;
+            comfyJobs.startedAt = 0;
+            comfyJobs.prompt = '';
+            comfyJobs.key = '';
+          }
+          return;
+        }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/persona-growth') {
           const grow = getPersonaGrowth();
           const role = readRoleState().role;
@@ -8027,6 +8126,43 @@ async function main() {
       }
     }
     return sentIds;
+  }
+
+  /** 把一张本地图片缓冲发进会话（ComfyUI 出图走这里；和表情一样串在 sendChain 里）。 */
+  async function sendImageToChatV2(key, buffer, { label = '图片', audit = true } = {}) {
+    if (!buffer?.length) throw new Error('图片为空');
+    if (buffer.length > MAX_MEDIA_BYTES) throw new Error(`图片 ${buffer.length} 字节，超过单条消息上限`);
+    const assertSendAllowed = captureSendGuard(key);
+    const [kind, id] = key.split(':');
+    const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
+    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    const params = kind === 'private'
+      ? { user_id: Number(id), message: [{ type: 'image', data: { file: 'base64://' + buffer.toString('base64') } }] }
+      : { group_id: Number(id), message: [{ type: 'image', data: { file: 'base64://' + buffer.toString('base64') } }] };
+    const res = await sendChain.then(async () => {
+      await sleep(randInt(300, 900));
+      assertSendAllowed();
+      const r = await fetch(`${httpUrl}/${action}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
+        },
+        body: JSON.stringify(params),
+        signal: AbortSignal.timeout(60000)
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || body.status !== 'ok' || body.retcode !== 0) {
+        throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || r.status}`);
+      }
+      return body.data ?? {};
+    });
+    if (audit) {
+      recordOwnMessage(key, res, 'image');
+      log(`[image] 已发送${label} → ${key}（${Math.round(buffer.length / 1024)} KB）`);
+      appendActivity(`${key} 收到一张${label}`);
+    }
+    return res;
   }
 
   /** 把名字/情绪词解析成大肥鱼表情包里的本地 GIF（给 qq_send_sticker 兜底用）。 */
@@ -9786,6 +9922,34 @@ async function main() {
       isSensitive: (t) => SENSITIVE_RE.test(String(t ?? '').replace(/[A-Za-z]:[\\/][^\s"'<>|]*/g, ''))
     });
     return personaGrowthInstance;
+  }
+
+  // 本机 ComfyUI：出图时才探测（1.5s 超时），没开就静默拉起（detached，不弹窗）。
+  // 配置在 config.json 的 comfy 段；没配 installDir/python 时只会报错不会乱起进程。
+  function getComfy() {
+    if (comfyInstance) return comfyInstance;
+    const comfyConf = (cfg.comfy && typeof cfg.comfy === 'object' && cfg.comfy) || {};
+    const resolveDir = (value, fallback) => {
+      const text = String(value || '').trim();
+      const dir = text ? path.resolve(ROOT, text) : path.join(ROOT, fallback);
+      return dir;
+    };
+    comfyInstance = createComfy({
+      baseUrl: String(comfyConf.baseUrl || 'http://127.0.0.1:8188'),
+      installDir: String(comfyConf.installDir || ''),
+      python: String(comfyConf.python || ''),
+      port: Number(comfyConf.port) || 8188,
+      listen: String(comfyConf.listen || '127.0.0.1'),
+      workflowDir: resolveDir(comfyConf.workflowDir, 'data/comfy/workflows'),
+      workDir: resolveDir(comfyConf.workDir, 'state/comfy'),
+      workflow: String(comfyConf.workflow || 'anima-turbo'),
+      autoStart: comfyConf.autoStart !== false,
+      startupTimeoutMs: Number(comfyConf.startupTimeoutMs) || 240000,
+      jobTimeoutMs: Number(comfyConf.jobTimeoutMs) || 900000,
+      logPath: path.join(ROOT, 'logs', 'comfy.log'),
+      log: (message) => log(`[comfy] ${message}`)
+    });
+    return comfyInstance;
   }
 
   function formatMemoryV2(st) {

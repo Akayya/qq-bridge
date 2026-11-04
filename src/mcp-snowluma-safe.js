@@ -329,6 +329,10 @@ const TOOL_CONFIG_FLAGS = {
   qq_profile: 'memory',
   qq_memory_distill: 'memory',
   qq_persona_grow: 'personaGrow',
+  qq_comfy_status: 'comfy',
+  qq_comfy_workflows: 'comfy',
+  qq_comfy_draw: 'comfy',
+  qq_comfy_cancel: 'comfy',
   qq_slang_query: 'slangQuery',
   qq_slang_submit: 'slangSubmit',
   qq_send_voice: 'sendVoice',
@@ -1120,6 +1124,94 @@ server.tool(
       return { content: [{ type: 'text', text: serializeModelData(data) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `人设成长操作失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_comfy_status',
+  '查看本机 ComfyUI 出图服务是否在线、默认工作流、以及是否正在画（只读）。一般不用主动调用——直接 qq_comfy_draw 就行，它会自己把 ComfyUI 静默拉起来。'
+  + '什么时候用：对方抱怨「怎么还没画好/是不是卡住了」、或你想看当前是不是有别的任务在跑时。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）')
+  },
+  async ({ key, token }) => {
+    try {
+      const data = await agentApi(`/api/comfy/status?fresh=1&key=${encodeURIComponent(key)}`, { method: 'GET', headers: { 'x-agent-token': token } });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `查询出图状态失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_comfy_workflows',
+  '列出现有的出图工作流模板（只读）：名字、默认尺寸/步数/负面词。想换风格/模型前先看这里，别瞎猜模板名。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）')
+  },
+  async ({ key, token }) => {
+    try {
+      const data = await agentApi('/api/comfy/workflows', { method: 'GET', headers: { 'x-agent-token': token } });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `列出工作流失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_comfy_draw',
+  '用本机 ComfyUI 画一张图并发进当前会话（默认 anima 动漫模型）。什么时候用：对方明确要「画一张/生成一张图/帮我想象一下这个画面」。'
+  + '纪律：① 一次只画一张，画完只回一句「画好了」+ 说清画了什么，别把整段提示词复述给对方；② 这活要 30~90 秒（冷启动 ComfyUI 可能要一两分钟），'
+  + '调用前可以顺手说一句「等我画一下」，别让对方干等着以为你失联；③ 提示词用画面描述（主体/动作/服装/背景/光线/构图），要英文关键词时自动翻成英文，别塞对话式的句子；'
+  + '④ 拿不准尺寸就用默认 1024×1024；不想要图只想要文件就设 send=false；⑤ 如果返回「正在画上一张」，等上一张完成再来，别重复提交。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    prompt: z.string().min(1).describe('画面描述（正向提示词）。建议英文标签式：主体、动作、服装、背景、光线、画风'),
+    negative: z.string().optional().describe('负面提示词，不填用模板默认（低质量/糊/畸形/文字水印等）'),
+    width: z.number().int().min(64).max(4096).optional().describe('宽，默认 1024'),
+    height: z.number().int().min(64).max(4096).optional().describe('高，默认 1024'),
+    steps: z.number().int().min(1).max(60).optional().describe('步数，默认 10（turbo 模型 8~12 就够）'),
+    seed: z.number().int().min(0).optional().describe('随机种子；想复现同一张就传上次返回的 seed'),
+    workflow: z.string().optional().describe('工作流模板名，默认 anima-turbo（可用 qq_comfy_workflows 查）'),
+    send: z.boolean().optional().describe('是否把图画进当前会话，默认 true')
+  },
+  async ({ key, token, prompt, negative, width, height, steps, seed, workflow, send }) => {
+    try {
+      const data = await agentApi('/api/comfy/draw', {
+        method: 'POST',
+        body: JSON.stringify({ key, prompt, negative, width, height, steps, seed, workflow, send }),
+        headers: { 'x-agent-token': token }
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      const message = String(error?.message ?? error);
+      if (/正在画上一张/.test(message)) {
+        return { content: [{ type: 'text', text: `现在正在画上一张，等一下再画：${message}` }], isError: true };
+      }
+      return { content: [{ type: 'text', text: `出图失败：${message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_comfy_cancel',
+  '中断 ComfyUI 当前正在画的任务（只用于「别画了/画错了/卡住不动」）。注意：画到一半的图会被丢掉，不保证还能出图。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）')
+  },
+  async ({ key, token }) => {
+    try {
+      const data = await agentApi('/api/comfy/cancel', { method: 'POST', body: JSON.stringify({ key }), headers: { 'x-agent-token': token } });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `取消失败：${error?.message ?? error}` }], isError: true };
     }
   }
 );
