@@ -740,6 +740,23 @@ function loadConfig() {
       autoSync: 'lazy',
       ...(file.nekowhale ?? {})
     },
+    // 本机 ComfyUI（bot 出图）：python / installDir 必须与 config.json 的 comfy 段一致，
+    // 否则「静默拉起」会因为没有解释器路径而失败（服务已在跑时不受影响，容易漏测）。
+    comfy: {
+      enabled: true,
+      baseUrl: 'http://127.0.0.1:8188',
+      installDir: '',
+      python: '',
+      port: 8188,
+      listen: '127.0.0.1',
+      workflowDir: 'data/comfy/workflows',
+      workDir: 'state/comfy',
+      workflow: 'anima-turbo',
+      autoStart: true,
+      startupTimeoutMs: 240000,
+      jobTimeoutMs: 900000,
+      ...(file.comfy ?? {})
+    },
     slang: {
       enabled: true,
       extractMinMessages: 10,
@@ -3477,7 +3494,7 @@ async function main() {
         // 管理端专用 v2 接口：带 agent token 的请求一律拒绝，防止 MCP 工具越权访问控制台功能
         // /api/socialV2/initial-prompt 也在这里：它是操作者写给 AI 的"环境背景"，
         // 让 AI 自己读/改等于把控制台的管理输入（以及未来可能写入的其它群信息）交给会话主体。
-        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/states', '/api/socialV2/wake', '/api/socialV2/initial-prompt'];
+        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/reset-session', '/api/socialV2/states', '/api/socialV2/wake', '/api/socialV2/initial-prompt'];
         if (req.headers['x-agent-token'] && (adminOnlyV2Paths.includes(url.pathname) || (url.pathname === '/api/socialV2/feedback' && req.method === 'GET') || (url.pathname === '/api/socialV2/tool-log' && req.method === 'GET'))) {
           sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
           return;
@@ -4789,6 +4806,26 @@ async function main() {
           }
           saveSocialV2State();
           sendJson({ ok: true, paused: socialV2.paused });
+          return;
+        }
+        // 按会话重置（只退役这一个 key 的 DSH 会话，不动记忆/档案）：用于「MCP 新增了工具，
+        // 但 DSH 会话是旧工具表创建的」这类情况——DSH 只在 session/create 时确立工具面，
+        // 已存在的会话不会热更新工具表。下次唤醒会用当前 preset 与最新工具表重建会话。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/reset-session') {
+          const body = await readBody();
+          const key = canonicalV2Key(body?.key);
+          if (!key) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          const retired = state.sessions[key] ?? null;
+          retireSession(key);
+          if (retired) {
+            // 先让 DSH 停下这个会话的活，再丢映射；否则它在途中仍会烧 token、发消息。
+            stopRetiredSessionWork(retired, key);
+            api.events.forget?.(retired);
+          }
+          forgetAgentToken(key);
+          saveState();
+          log(`控制台：已重置会话 ${key}${retired ? `（旧 ${retired}）` : '（原本没有会话）'}，下次唤醒按当前工具表重建`);
+          sendJson({ ok: true, key, retired });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/reset') {
