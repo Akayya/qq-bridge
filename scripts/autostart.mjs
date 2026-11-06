@@ -82,11 +82,16 @@ function startSnowLuma() {
     return false;
   }
   const winLauncher = LAUNCHER.replace(/\//g, "\\");
+  // launcher.bat 里直接写 `node ./check-node-version.cjs`，依赖 PATH 上有 node。
+  // 本机没装全局 node，只有 DSH 运行时那份，所以把它的目录临时加进 PATH，
+  // 否则 check-node-version 失败会停在 pause，SnowLuma 永远起不来。
+  const nodeDir = path.dirname(process.execPath);
   const child = spawn("cmd.exe", ["/c", "start", "", winLauncher], {
     cwd: SNOWLUMA_DIR.replace(/\//g, "\\"),
     detached: true,
     stdio: "ignore",
-    windowsHide: true
+    windowsHide: true,
+    env: { ...process.env, PATH: `${nodeDir}${path.delimiter}${process.env.PATH ?? ""}` }
   });
   child.unref();
   log(`已启动 SnowLuma：${winLauncher}`);
