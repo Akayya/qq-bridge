@@ -48,6 +48,8 @@ import {
   saveStickerStore,
   mergeStickerLibrary,
   findSticker,
+  findStickerByLabel,
+  stickerLabelCandidates,
   formatStickerList,
   buildStickerContext,
   buildStickerStrategyHint,
@@ -1609,12 +1611,18 @@ async function main() {
   // 取单个表情的图片字节（多模态用）。
   async function getStickerImageData(stickerId) {
     const synced = await syncStickerLibrary(false);
-    const entry = findSticker(synced?.entries ?? stickerEntries, stickerId);
+    const pool = synced?.entries ?? stickerEntries;
+    const entry = findSticker(pool, stickerId) || findStickerByLabel(pool, stickerId);
     if (!entry) {
       // 本地没有时，尝试强制刷新一次再找（收藏可能在会话过程中新增）
       const forced = await syncStickerLibrary(true);
-      const entry2 = findSticker(forced?.entries ?? stickerEntries, stickerId);
-      if (!entry2) throw new Error(`找不到表情 ${stickerId}，请先用 qq_list_stickers 获取有效 id`);
+      const pool2 = forced?.entries ?? stickerEntries;
+      const entry2 = findSticker(pool2, stickerId) || findStickerByLabel(pool2, stickerId);
+      if (!entry2) {
+        const hints = stickerLabelCandidates(pool2, 6);
+        const hintText = hints.length ? `；收藏里相近的有：${hints.join('、')}` : '';
+        throw new Error(`找不到表情 ${stickerId}${hintText}。请先用 qq_list_stickers 获取有效 id`);
+      }
       return entry2;
     }
     return entry;
@@ -2010,12 +2018,19 @@ async function main() {
     const assertSendAllowed = captureSendGuard(key);
     // 发送前强制同步一次，确保“刚新增的表情能立即用、刚删除的表情不会继续发”。
     const synced = await syncStickerLibrary(true);
-    const entry = findSticker(synced?.entries ?? stickerEntries, stickerRef);
+    const pool = synced?.entries ?? stickerEntries;
+    // 先按 id/md5/url 精确匹配，再按「人话」（备注/标签）模糊匹配：
+    // 模型手里通常只有表情上的字（「呆猫装傻」），没理由逼它先背 emoji_id。
+    const entry = findSticker(pool, stickerRef) || findStickerByLabel(pool, stickerRef);
     if (!entry) {
       // QQ 收藏里没有这个 id？再按名字/情绪词去大肥鱼表情包（322 张自带表情）里找一张。
       // 这样模型手里的 qq_send_sticker 既能发收藏，也能发「摸鱼」「无语」这类情绪词。
       const fallback = await resolveNekowhaleSticker(stickerRef);
-      if (!fallback) throw new Error(`找不到表情 ${stickerRef}，请先用 qq_list_stickers 获取有效 id`);
+      if (!fallback) {
+        const hints = stickerLabelCandidates(pool, 6);
+        const hintText = hints.length ? `；收藏里相近的有：${hints.join('、')}` : '';
+        throw new Error(`找不到表情 ${stickerRef}${hintText}。也可以用大肥鱼表情包的情绪词（如「摸鱼」「无语」「比心」），或先调 qq_list_stickers 看 id`);
+      }
       const [messageId] = await sendNekowhaleStickers(key, [fallback]);
       log(`[sticker] 收藏里没有「${stickerRef}」，改发大肥鱼表情包：${fallback.name}`);
       return { entry: { id: fallback.name, name: fallback.name, source: 'nekowhale' }, messageId: messageId ?? null };
@@ -8205,7 +8220,8 @@ async function main() {
   /** 把名字/情绪词解析成大肥鱼表情包里的本地 GIF（给 qq_send_sticker 兜底用）。 */
   async function resolveNekowhaleSticker(ref) {
     if (!nekowhale) return null;
-    const name = String(ref ?? '').trim();
+    // 允许显式前缀 `pack:名字`（模型想强制用自带表情包时），也允许只给名字/情绪词。
+    const name = String(ref ?? '').trim().replace(/^pack:\s*/iu, '');
     if (!name) return null;
     try {
       const { stickers } = await nekowhale.digest(`[sticker:${name}]`);

@@ -193,6 +193,56 @@ export function findSticker(entries, ref) {
   return (urlNormalized && list.find((e) => e && stickerUrlKey(e.url) === urlNormalized)) || null;
 }
 
+// 按「人话」找表情：模型经常只记得表情上的字（如「呆猫装傻」），手里没有 emoji_id。
+//
+// 只做确定的弱匹配，宁可返回 null 让调用方报错并列出候选项，也不要猜错发一张完全无关的图：
+//   desc / localNote / tags 完全相等 → 100 分；互相包含 → 70 分；命中标签 → 55 分；
+//   候选之间同分时取用过次数多的那张（更可能是对方熟悉的）。
+export function findStickerByLabel(entries, ref) {
+  const raw = String(ref ?? '').trim();
+  if (!raw || raw.length > 80) return null;
+  const norm = (s) => String(s ?? '').toLowerCase().replace(/[\s，。,.、!！?？~～·\-—]+/gu, '');
+  const target = norm(raw);
+  if (!target) return null;
+  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+  let best = null;
+  for (const e of list) {
+    const labels = [e.desc, e.localNote].map(norm).filter(Boolean);
+    const tags = (e.tags || []).map(norm).filter(Boolean);
+    let score = 0;
+    for (const label of labels) {
+      if (label === target) score = Math.max(score, 100);
+      else if (label.includes(target) || target.includes(label)) score = Math.max(score, 70);
+      else if (target.length >= 3 && label.length >= 3) {
+        // 字重叠率：两三个字一致就够用（「呆猫装傻」vs「呆猫」）
+        let hit = 0;
+        for (const ch of new Set(target)) if (label.includes(ch)) hit += 1;
+        const ratio = hit / Math.max(1, Math.min(target.length, label.length));
+        if (ratio >= 0.6) score = Math.max(score, 55);
+      }
+    }
+    for (const tag of tags) {
+      if (tag === target) score = Math.max(score, 60);
+      else if (tag.includes(target) || target.includes(tag)) score = Math.max(score, 50);
+    }
+    if (!score) continue;
+    if (!best || score > best.score || (score === best.score && (e.useCount || 0) > (best.entry.useCount || 0))) {
+      best = { entry: e, score };
+    }
+  }
+  return best ? best.entry : null;
+}
+
+// 报错时给模型看的候选项：优先带备注的、用过的。
+export function stickerLabelCandidates(entries, limit = 6) {
+  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+  return list
+    .filter((e) => e.desc || e.localNote)
+    .sort((a, b) => (b.useCount || 0) - (a.useCount || 0))
+    .slice(0, Math.max(1, Math.min(20, Number(limit) || 6)))
+    .map((e) => `${e.desc || e.localNote}（id ${e.id}）`);
+}
+
 // 格式化给 AI 看的表情列表；query 会匹配 desc/localNote/tags/usage/id/md5。
 export function formatStickerList(entries, query = '', limit = 48) {
   const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);

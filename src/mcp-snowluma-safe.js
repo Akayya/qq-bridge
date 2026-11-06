@@ -1361,11 +1361,11 @@ if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.getStickerI
 if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.sendSticker !== false) {
   server.tool(
     'qq_send_sticker',
-    '在指定会话发送一个 QQ 收藏表情包（自定义表情）。stickerId 用 qq_list_stickers 返回的 id / md5 / url。注意：一条消息只能是一张表情，不能在同一气泡里附带文字；想说的话请先用 qq_send_message / qq_reply 作为单独气泡发送，再单独发这张表情。需要引用/点名时可用 replyToMessageId / atUserId（群聊）。真人偶尔用表情包很自然，但别刷屏。',
+    '在指定会话发送一个 QQ 收藏表情包（自定义表情）。stickerId 支持四种写法：① qq_list_stickers 返回的 id / md5 / url；② 收藏表情的中文名字或备注（如「呆猫装傻」），桥接会按 desc/localNote/tags 模糊匹配，匹配不上会列出你收藏里相近的名字；③ 大肥鱼自带表情包的名字或情绪词（如「摸鱼」「无语」「比心」「开心」「道歉」），收藏里没有时会自动去 322 张自带表情里挑一张；④ `pack:名字` 强制从自带表情包取。注意：一条消息只能是一张表情，不能在同一气泡里附带文字；想说的话请先用 qq_send_message / qq_reply 作为单独气泡发送，再单独发这张表情。需要引用/点名时可用 replyToMessageId / atUserId（群聊）。真人偶尔用表情包很自然，但别刷屏。',
     {
       key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
       token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-      stickerId: z.string().describe('表情标识：emoji_id / md5 / 图片 URL（来自 qq_list_stickers）'),
+      stickerId: z.string().describe('表情标识：emoji_id / md5 / 图片 URL / 收藏表情的名字或备注 / 大肥鱼自带表情的名字或情绪词'),
       replyToMessageId: z.union([z.number(), z.string()]).optional().describe('要引用/回复的消息 id（非零整数，可为负数，可选）'),
       atUserId: z.union([z.number(), z.string()]).optional().describe('要 @ 的群成员 QQ 号（群聊中可选，私聊不可用）')
     },
