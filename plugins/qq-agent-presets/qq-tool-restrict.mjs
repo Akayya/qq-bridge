@@ -334,6 +334,11 @@ export function apply(ctx) {
     if (typeof name !== 'string' || name.length === 0) return '工具名无效，已拒绝'
     if (SAFE_EXACT.has(name)) return
     if (SAFE_PREFIXES.some((prefix) => name.startsWith(prefix))) return
+    // 表情包类插件工具：放行也没用（它们的返回是给网页界面看的 Markdown，不会到 QQ），
+    // 所以拦下并**直接告诉模型该怎么走**，免得它反复试、来回失败。
+    if (/^(sticker_search|sticker_send|sticker_manage|meme_render)$/.test(name)) {
+      return `工具 "${name}" 是 DSH 网页端的表情工具，不会把图发到 QQ。发表情请用 mcp__snowluma__qq_send_sticker：stickerId 可以填收藏表情的名字或备注（如「呆猫装傻」），也可以填大肥鱼自带表情的名字或情绪词（如「摸鱼」「无语」「比心」）。`
+    }
     return `工具 "${name}" 不在 QQ 桥接白名单内，已拒绝（仅允许 QQ MCP 工具与无害模型侧工具）`
   })
 }
