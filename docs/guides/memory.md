@@ -122,3 +122,15 @@ node scripts/test-shared-memory.mjs      # 共享记忆：单测 + HTTP 端到�
 node scripts/test-profiles-distill.mjs   # 档案 + 提炼
 node scripts/test-mcp-servers-stdio.mjs  # 三个 MCP server 接入 + 记忆查询实调用
 ```
+
+## 提示词瘦身（promptProfile）
+
+每轮唤醒提示里原本有一大段「每轮都一样」的静态规则（反AI味、积极性、表情包策略、沉睡观察、引用规则…）。
+现在默认把它们挪到角色预设 `dsh/agent-presets/qq-chat-v2/agent.cordis.yml` 的【静态行为规则】段，
+作为系统提示只写一次（之后走缓存）；唤醒提示只保留这一轮真正需要的内容。
+
+- 默认：`config.json` → `socialV2.promptProfile: "lean"`（管理员私聊实测 4049 → 2537 字，省约 37%）。
+- 回退：把值改成 `"full"`，静态规则会回到唤醒提示里（不用改代码，重启桥接即生效）。
+- 预设属于「会话创建时确立」的内容：改了预设之后必须 重启 DSH → 双击「启动QQ机器人.cmd」→
+  `node scripts/reset-sessions.mjs`，否则旧会话仍用旧系统提示（表现为少了某几条规则、或看不到新加的工具）。
+- 回归：`node scripts/test-prompt-profile.mjs`（静态检查三处是否齐全）、`node scripts/test-preset-patch-sync.mjs`。
