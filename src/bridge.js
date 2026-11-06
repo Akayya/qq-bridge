@@ -3509,7 +3509,7 @@ async function main() {
         // 管理端专用 v2 接口：带 agent token 的请求一律拒绝，防止 MCP 工具越权访问控制台功能
         // /api/socialV2/initial-prompt 也在这里：它是操作者写给 AI 的"环境背景"，
         // 让 AI 自己读/改等于把控制台的管理输入（以及未来可能写入的其它群信息）交给会话主体。
-        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/reset-session', '/api/socialV2/states', '/api/socialV2/wake', '/api/socialV2/initial-prompt'];
+        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/reset-session', '/api/socialV2/sessions', '/api/socialV2/states', '/api/socialV2/wake', '/api/socialV2/initial-prompt'];
         if (req.headers['x-agent-token'] && (adminOnlyV2Paths.includes(url.pathname) || (url.pathname === '/api/socialV2/feedback' && req.method === 'GET') || (url.pathname === '/api/socialV2/tool-log' && req.method === 'GET'))) {
           sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
           return;
@@ -4826,6 +4826,20 @@ async function main() {
         // 按会话重置（只退役这一个 key 的 DSH 会话，不动记忆/档案）：用于「MCP 新增了工具，
         // 但 DSH 会话是旧工具表创建的」这类情况——DSH 只在 session/create 时确立工具面，
         // 已存在的会话不会热更新工具表。下次唤醒会用当前 preset 与最新工具表重建会话。
+        // 当前 key → DSH 会话 的映射（控制台专用）。
+        // 为什么要有它：DSH 只在 session/create 时固定工具表与系统提示，改了预设或
+        // 加了 MCP 工具之后，只有「重建会话」才会生效。之前 reset-sessions.mjs 去读
+        // /api/socialV2/state（那个接口要 key 参数）拿不到映射，于是永远打印
+        // 「没有需要重建的会话」——看着像跑成功了，实际一个都没重置。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/sessions') {
+          sendJson({
+            ok: true,
+            mode: currentMode,
+            sessions: { ...state.sessions },
+            policies: { ...state.sessionPolicies }
+          });
+          return;
+        }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/reset-session') {
           const body = await readBody();
           const key = canonicalV2Key(body?.key);

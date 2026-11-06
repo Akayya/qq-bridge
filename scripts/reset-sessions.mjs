@@ -12,6 +12,7 @@
 //   node scripts/reset-sessions.mjs               # 重建所有会话
 //   node scripts/reset-sessions.mjs --dry         # 只看会重建哪些
 //   node scripts/reset-sessions.mjs --key private:227277385  # 只重建一个
+
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -39,29 +40,38 @@ const token = readToken();
 const headers = { 'x-console-token': token, 'content-type': 'application/json' };
 
 async function main() {
-  const st = await (await fetch(`${base}/api/socialV2/state`, { headers })).json();
-  const keys = Object.keys(st.sessions || {}).sort();
+  const res = await fetch(`${base}/api/socialV2/sessions`, { headers });
+  const payload = await res.json();
+  if (!payload.ok) throw new Error(`读取会话映射失败：${payload.error || res.status}`);
+
+  const sessions = payload.sessions || {};
+  const keys = Object.keys(sessions).sort();
   const targets = keyArg ? keys.filter((k) => k === keyArg) : keys;
-  if (!targets.length) {
-    console.log('没有需要重建的会话');
+
+  if (!keys.length) {
+    console.log('当前没有会话映射：DSH 侧还没有为任何聊天建过会话。');
+    console.log('直接让人发一条消息即可（会自动按最新的工具表与预设建会话），不需要重建。');
     return;
   }
-  console.log(`平台 ${st.mode || st.platform || ''}，共 ${keys.length} 个会话，本次处理 ${targets.length} 个：`);
+
+  console.log(`模式 ${payload.mode || ''}，共 ${keys.length} 个会话，本次处理 ${targets.length} 个：`);
+
   for (const key of targets) {
-    const sid = st.sessions[key];
+    const sid = sessions[key];
     if (dry) {
-      console.log(`  [dry] ${key} → ${String(sid).slice(0, 18)}…`);
+      console.log(`  [dry] ${key} → ${String(sid).slice(0, 22)}…`);
       continue;
     }
-    const res = await fetch(`${base}/api/socialV2/reset-session`, {
+    const r = await fetch(`${base}/api/socialV2/reset-session`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ key })
     });
-    const body = await res.json().catch(() => ({}));
-    if (body.ok) console.log(`  ✓ ${key}（旧会话 ${String(sid).slice(0, 18)}… 已退役）`);
-    else console.log(`  ✗ ${key}：${body.error || res.status}`);
+    const body = await r.json().catch(() => ({}));
+    if (body.ok) console.log(`  ✅ ${key}（旧会话 ${String(sid).slice(0, 22)}… 已退役）`);
+    else console.log(`  ❌ ${key}：${body.error || r.status}`);
   }
+
   console.log(dry ? '（dry run，没有真的重建）' : '完成。下一次有人说话时，新会话会带上最新的工具与系统提示。');
 }
 
