@@ -91,7 +91,14 @@ function startSnowLuma() {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
-    env: { ...process.env, PATH: `${nodeDir}${path.delimiter}${process.env.PATH ?? ""}` }
+    env: {
+      ...process.env,
+      PATH: `${nodeDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      // 关掉 SnowLuma 的在线更新检查（它认这个变量，0/false/off/no 都算关）。
+      // 写在这里是为了不依赖“资源管理器有没有刷新过环境变量”：
+      // 用户环境里那份可能在重启资源管理器/重新登录前不生效。
+      SNOWLUMA_UPDATE_CHECK: process.env.SNOWLUMA_UPDATE_CHECK ?? "0"
+    }
   });
   child.unref();
   log(`已启动 SnowLuma：${winLauncher}`);
