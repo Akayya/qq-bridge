@@ -2,16 +2,21 @@
 // 和每个会话的轻量记忆（话题/想法/印象）导出成 JSON，提交并推送到私有仓库。
 //
 // 用法：
-//   node scripts/backup-memory.mjs                # 导出 + commit + push
+//   node scripts/backup-memory.mjs                # 有变化才导出 + commit + push
+//   node scripts/backup-memory.mjs --force        # 无视「没变化」强制导出一次
 //   node scripts/backup-memory.mjs --no-push      # 只导出
 //   node scripts/backup-memory.mjs --dir D:\x     # 指定本地备份仓库目录
 //
 // 设计取舍：
 //   - 只导出「记忆」，不导出 config.json / 会话令牌 / 聊天正文，避免把密钥和别人的私聊顶上云。
+//   - **只在记忆内容真的变了时才写文件、提交、推送**：快照里的 generatedAt 每次都不同，
+//     所以不能靠 git status 判断有没有变化，得先比内容指纹（state/memory-backup.json 里的 hash）。
+//     没变化时脚本 0.05 秒退出，不联网、不写盘。
 //   - 每天一个文件（同一天多次运行会覆盖当天文件），保留最近 60 天。
 //   - 用 JSON 而不是直接提交 sqlite 文件：文本好 diff、好回收，仓库不会因为二进制膨胀。
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { ROOT } from './lib/owner.mjs';
@@ -27,8 +32,11 @@ const REPO_DIR = path.resolve(valueOf('--dir', process.env.BRIDGE_MEMORY_BACKUP_
 // 0（或负数）= 不清理历史，永久保留每日快照
 const KEEP_DAYS = Math.max(0, Number(valueOf('--keep-days', '60')) || 0);
 const NO_PUSH = has('--no-push');
+const FORCE = has('--force');
 const STATE_DIR = path.join(ROOT, 'state');
 const SNAP_DIR = path.join(REPO_DIR, 'snapshots');
+// 上一次成功上传的内容指纹（放桥接自己的 state 里，不进备份仓库）
+const MARKER_FILE = path.join(STATE_DIR, 'memory-backup.json');
 
 function readJson(file, fallback) {
   try {
@@ -97,8 +105,12 @@ function pruneOldSnapshots() {
   return removed;
 }
 
+// 这台机器上 openssl 后端拿不到 CA（报 unable to get local issuer certificate (20)），
+// 而 Windows 自带的 schannel 能正常握手，所以这里显式用 schannel。
+const GIT_SSL_ARGS = ['-c', 'http.sslBackend=schannel'];
+
 function runGit(gitArgs) {
-  const res = spawnSync('git', ['-c', 'http.sslBackend=openssl', ...gitArgs], {
+  const res = spawnSync('git', [...GIT_SSL_ARGS, ...gitArgs], {
     cwd: REPO_DIR,
     encoding: 'utf8',
     timeout: 120000
@@ -112,13 +124,70 @@ const pad = (n) => String(n).padStart(2, '0');
 const day = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 const stamp = `${day}T${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
 
+// 稳定的 JSON 序列化：对象键排序，保证同样的记忆内容算出同样的指纹
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+const memories = readMemories();
+const profiles = readProfiles();
+const lightMemory = readLightMemory();
+
+// 指纹只覆盖「记忆内容」本身，不覆盖会自然变动的字段：
+//   - memory.db 的 used_at / hits：每次召回都会变，但不代表记忆更新了
+//   - 轻量记忆的 recentCount / lastIncomingAt：聊天一多就变，同理
+// 否则「没更新记忆」也会被判成有变化，又回到每轮都上传。
+const fingerprint = crypto
+  .createHash('sha256')
+  .update(
+    stableStringify({
+      schema: 1,
+      memories: memories.map((m) => ({
+        id: m.id,
+        kind: m.kind,
+        text: m.text,
+        tags: m.tags,
+        scope: m.scope,
+        source_key: m.source_key,
+        created_at: m.created_at
+      })),
+      profiles,
+      lightMemory: Object.fromEntries(
+        Object.entries(lightMemory).map(([key, st]) => [
+          key,
+          {
+            activeTopics: st.activeTopics,
+            pendingThoughts: st.pendingThoughts,
+            memberImpressions: st.memberImpressions
+          }
+        ])
+      )
+    })
+  )
+  .digest('hex');
+
+// 内容没变就什么都不做：不写快照、不 commit、不 push、不联网。
+// 这一步是必须的——快照里的 generatedAt 每次都不同，光看 git status 永远"有变化"，
+// 以前就是这样每 6 小时往 GitHub 顶一次一模一样的记忆。
+const marker = readJson(MARKER_FILE, null);
+if (!FORCE && marker && marker.hash === fingerprint) {
+  const at = marker.at ? new Date(marker.at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '未知时间';
+  console.log(`记忆没有变化（${memories.length} 条记忆，上次上传 ${at}），跳过。`);
+  process.exit(0);
+}
+
 const snapshot = {
   schema: 1,
   generatedAt: now.toISOString(),
   source: { stateDir: STATE_DIR },
-  memories: readMemories(),
-  profiles: readProfiles(),
-  lightMemory: readLightMemory()
+  memories,
+  profiles,
+  lightMemory
 };
 
 if (!fs.existsSync(SNAP_DIR)) fs.mkdirSync(SNAP_DIR, { recursive: true });
@@ -139,8 +208,17 @@ if (!fs.existsSync(path.join(REPO_DIR, '.git'))) {
   process.exit(1);
 }
 
+const writeMarker = () => {
+  fs.writeFileSync(
+    MARKER_FILE,
+    `${JSON.stringify({ hash: fingerprint, at: now.toISOString(), counts }, null, 2)}\n`,
+    'utf8'
+  );
+};
+
 const status = runGit(['status', '--porcelain']);
 if (!status.out) {
+  writeMarker();
   console.log('没有变化，跳过提交。');
   process.exit(0);
 }
@@ -168,4 +246,5 @@ if (push.code !== 0) {
   console.error(`git push 失败：${push.out}`);
   process.exit(1);
 }
-console.log('已推送到远端。');
+writeMarker();
+console.log(`已推送到远端；记下内容指纹 ${fingerprint.slice(0, 12)}（下次记忆没变就不来了）。`);

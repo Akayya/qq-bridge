@@ -72,13 +72,28 @@
 提交并推送到**私有**仓库；只导记忆，不导 `config.json`、会话令牌和聊天正文。
 
 ```bash
-node scripts/backup-memory.mjs              # 导出 + commit + push
+node scripts/backup-memory.mjs              # 有变化才导出 + commit + push
+node scripts/backup-memory.mjs --force      # 无视「没变化」强制导出一次
 node scripts/backup-memory.mjs --no-push    # 只导出
 node scripts/backup-memory.mjs --dir D:\x   # 指定本地仓库目录（默认 D:\DSH_MEMORY_BACKUP）
 node scripts/backup-memory.mjs --keep-days 0 # 不清理历史快照（默认保留 60 天）
 ```
 
+### 只在记忆真的变了时才上传
+计划任务 `qq-bridge-memory-backup` 每 **30 分钟**唤醒一次（隐藏窗口，`scripts/backup-memory-hidden.vbs`），
+但脚本一开头就比对**内容指纹**：
+
+- 指纹 = `memory.db` 的 id/kind/text/tags/scope/source_key/created_at + `profiles.json` + 轻量记忆的
+  话题/想法/印象，用 sha256 算一个 hash，记在 `state/memory-backup.json`；
+- 故意**不含** `used_at`/`hits`（每次召回都会变）和 `recentCount`/`lastIncomingAt`（聊天一多就变），
+  否则「只是聊了几句」也会被测成「记忆更新了」；
+- 指纹和上次上传的一致 → 直接 `exit 0`（约 60 ms，不写盘、不联网、不 commit）；
+- 只有变了才导出快照、commit、push，**成功之后**才写回新指纹（push 失败下次会重试）。
+
+所以 bot 没启动、或者启动了一直没动记忆的日子，GitHub 上不会多出任何提交。
+
 > 清理只删「每日历史快照文件」，`latest.json` 永远是最新全量；记忆本身在 `state/memory.db` 里不受影响。
+> 这台机器上 git 走 `schannel` 后端（openssl 拿不到 CA，报 `unable to get local issuer certificate (20)`）。
 
 ## 语义召回（向量）
 
